@@ -436,7 +436,7 @@ class Trainer:
         axes[1, 1].legend()
         axes[1, 1].grid(True)
         
-        plt.tight_layout()
+        plt.tight_layout(pad=3.0)
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')

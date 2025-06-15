@@ -7,18 +7,21 @@ import os
 import sys
 import argparse
 import torch
+import torch.nn.functional as F # Added
 import random
 import numpy as np
 from pathlib import Path
+from tqdm import tqdm
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms
+from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms # create_transforms is here
 from models.efficientnet_classifier import EfficientNetClassifier
 from training.trainer import Trainer
 from torch.utils.data import DataLoader
+from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam # Was already Added
 
 
 def set_seed(seed: int):
@@ -162,6 +165,184 @@ def create_data_loaders(config: ProjectConfig) -> tuple:
     return train_loader, val_loader, test_loader
 
 
+def evaluate_model_after_training(config: ProjectConfig, model_path: str, test_loader: DataLoader, device: torch.device, art_periods: list):
+    """Evaluate the trained model on test data and save metrics."""
+    print("\n" + "="*50)
+    print("POST-TRAINING EVALUATION ON TEST SET")
+    print("="*50)
+
+    # Load trained model
+    print(f"Loading best model from: {model_path}")
+    model = EfficientNetClassifier(
+        backbone=config.model.backbone,
+        num_classes=len(art_periods)
+    )
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    
+    print(f"Model loaded from epoch {checkpoint['epoch']}")
+    if 'metrics' in checkpoint and 'best_val_acc' in checkpoint['metrics']:
+         print(f"Original best validation accuracy during training: {checkpoint['metrics']['best_val_acc']:.4f}")
+    elif 'best_val_acc' in checkpoint: # For older checkpoints
+         print(f"Original best validation accuracy during training: {checkpoint['best_val_acc']:.4f}")
+
+
+    all_predictions = []
+    all_labels = []
+    all_confidences = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(test_loader, desc="Evaluating on Test Set"):
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            probabilities = F.softmax(outputs, dim=1)
+            predictions = torch.argmax(outputs, dim=1)
+            confidences = torch.max(probabilities, dim=1)[0]
+            
+            all_predictions.extend(predictions.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_confidences.extend(confidences.cpu().numpy())
+
+    test_accuracy = accuracy_score(all_labels, all_predictions)
+    print(f"\n🎯 TEST SET RESULTS:")
+    print(f"Test Accuracy: {test_accuracy:.4f} ({test_accuracy*100:.2f}%)")
+    print(f"Average Confidence: {np.mean(all_confidences):.4f}")
+
+    # Classification report
+    report_text = classification_report(
+        all_labels, all_predictions, 
+        target_names=art_periods, 
+        digits=4
+    )
+    print("\n📊 DETAILED CLASSIFICATION REPORT (Test Set):")
+    print("--------------------------------------------------")
+    print(report_text)
+    
+    report_path = os.path.join(config.training.output_dir, "test_classification_report.txt")
+    with open(report_path, "w") as f:
+        f.write(f"Test Accuracy: {test_accuracy:.4f} ({test_accuracy*100:.2f}%)\n")
+        f.write(f"Average Confidence: {np.mean(all_confidences):.4f}\n\n")
+        f.write(report_text)
+    print(f"Classification report saved to: {report_path}")
+
+    # Confusion matrix
+    cm = confusion_matrix(all_labels, all_predictions)
+    plt.figure(figsize=(12, 10)) # Adjusted figure size
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=art_periods, yticklabels=art_periods)
+    plt.title(f'Test Set Confusion Matrix - Accuracy: {test_accuracy:.2%}', fontsize=14) # Added fontsize
+    plt.xlabel('Predicted Label', fontsize=12) # Added fontsize
+    plt.ylabel('True Label', fontsize=12) # Added fontsize
+    plt.xticks(rotation=45, ha='right', fontsize=10) # Added fontsize
+    plt.yticks(rotation=0, fontsize=10) # Added fontsize
+    plt.tight_layout(pad=2.0) # Adjusted padding
+
+    cm_path = os.path.join(config.training.output_dir, "test_confusion_matrix.png")
+    plt.savefig(cm_path, dpi=300, bbox_inches='tight')
+    print(f"Confusion matrix saved to: {cm_path}")
+    # plt.show() # Optionally show, but usually not needed in automated scripts
+    plt.close()
+
+
+def generate_gradcam_examples(config: ProjectConfig, model_path: str, test_loader: DataLoader, device: torch.device, art_periods: list, num_examples_per_class: int = 1):
+    """Generate Grad-CAM visualizations for a few examples from the test set."""
+    print("\n" + "="*50)
+    print("GENERATING GRAD-CAM EXAMPLES")
+    print("="*50)
+
+    # Load trained model
+    print(f"Loading best model from: {model_path}")
+    model = EfficientNetClassifier(
+        backbone=config.model.backbone,
+        num_classes=len(art_periods)
+    )
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+
+    # Initialize GradCAMVisualizer
+    # Attempt to find a suitable layer automatically; common choices for EfficientNet
+    # Try last block of the backbone first, then conv_head
+    try:
+        target_layer_name = "backbone.blocks[-1]" # More specific for our model structure
+        gradcam_vis = GradCAMVisualizer(model, target_layer_name=target_layer_name)
+    except Exception as e_block:
+        print(f"Warning: Could not initialize GradCAM with {target_layer_name} ({e_block}). Trying 'backbone.conv_head'.")
+        try:
+            target_layer_name = "backbone.conv_head"
+            gradcam_vis = GradCAMVisualizer(model, target_layer_name=target_layer_name)
+        except Exception as e_conv_head:
+            print(f"Error initializing GradCAMVisualizer with common layers: {e_conv_head}. Skipping Grad-CAM generation.")
+            return
+
+    print(f"Grad-CAM initialized with target layer: {gradcam_vis.target_layer_name}")
+
+    # Get a few images from the test_loader
+    # We need original image paths to load them without normalization for visualization
+    # The test_loader.dataset should be an ArtPeriodDataset or a Subset of it.
+    
+    # Get the underlying dataset if test_loader.dataset is a Subset
+    actual_dataset = test_loader.dataset
+    if isinstance(actual_dataset, torch.utils.data.Subset):
+        actual_dataset = actual_dataset.dataset
+
+    # Ensure the actual_dataset has image_paths and labels attributes
+    if not hasattr(actual_dataset, 'image_paths') or not hasattr(actual_dataset, 'labels'):
+        print("Error: Test dataset does not have 'image_paths' or 'labels' attributes. Skipping Grad-CAM.")
+        return
+
+    # Create a basic transform for Grad-CAM preprocessing (without augmentation)
+    # This transform is for the model input, the visualizer also needs the raw image.
+    gradcam_transform = create_transforms(config.data.image_size, is_training=False)
+
+    output_gradcam_dir = os.path.join(config.training.output_dir, "gradcam_examples")
+    os.makedirs(output_gradcam_dir, exist_ok=True)
+
+    images_processed_per_class = {i: 0 for i in range(len(art_periods))}
+    images_shown_count = 0
+
+    for i in range(len(actual_dataset)):
+        if images_shown_count >= len(art_periods) * num_examples_per_class:
+            break # Stop if we have enough examples overall
+
+        image_path = actual_dataset.image_paths[i]
+        label_idx = actual_dataset.labels[i]
+
+        if images_processed_per_class[label_idx] < num_examples_per_class:
+            try:
+                print(f"Processing Grad-CAM for: {image_path} (Class: {art_periods[label_idx]})")
+                # Preprocess image for Grad-CAM (gets tensor for model, and original for display)
+                input_tensor, original_image_np = preprocess_image_for_gradcam(image_path, gradcam_transform)
+                input_tensor = input_tensor.to(device)
+
+                with torch.no_grad():
+                    logits = model(input_tensor)
+                
+                # Sanitize filename
+                base_filename = os.path.basename(image_path)
+                safe_filename = "".join(c if c.isalnum() or c in ('.', '_') else '_' for c in base_filename)
+                save_path = os.path.join(output_gradcam_dir, f"{art_periods[label_idx]}_{safe_filename}_gradcam.png")
+
+                gradcam_vis.visualize_predictions(
+                    input_tensor=input_tensor,
+                    original_image=original_image_np,
+                    logits=logits,
+                    class_names=art_periods,
+                    top_k=3,
+                    save_path=save_path
+                )
+                print(f"Grad-CAM saved to {save_path}")
+                images_processed_per_class[label_idx] += 1
+                images_shown_count += 1
+            except Exception as e:
+                print(f"Error generating Grad-CAM for {image_path}: {e}")
+        
+    print(f"Grad-CAM example generation complete. Images saved in {output_gradcam_dir}")
+
+
 def main():
     """Main training function."""
     args = parse_arguments()
@@ -280,7 +461,14 @@ def main():
     print(f"Final trainable parameters: {summary['parameter_count']['trainable_parameters']:,}")
     
     print(f"\nTraining completed! Best model saved to:")
-    print(f"{os.path.join(config.training.output_dir, 'checkpoints', 'best_model.pth')}")
+    best_model_path = os.path.join(config.training.output_dir, 'checkpoints', 'best_model.pth')
+    print(best_model_path)
+
+    # Evaluate model on test set after training
+    evaluate_model_after_training(config, best_model_path, test_loader, device, config.data.art_periods)
+
+    # Generate Grad-CAM examples
+    generate_gradcam_examples(config, best_model_path, test_loader, device, config.data.art_periods, num_examples_per_class=1)
 
 
 if __name__ == "__main__":

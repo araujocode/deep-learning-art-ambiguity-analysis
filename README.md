@@ -1,10 +1,10 @@
 # Artistic Style Period Classification Pipeline with Ambiguity Detection
 
-A comprehensive, modular implementation of an artistic style period classification system using EfficientNet-B0, featuring stylistic ambiguity detection and interpretability analysis.
+A comprehensive, modular implementation of an artistic style period classification system using EfficientNet, featuring stylistic ambiguity detection and interpretability analysis.
 
 ## Project Overview
 
-This project implements a machine learning pipeline for classifying artworks into historical periods (Renaissance, Baroque, Romanticism, Impressionism, Post-Impressionism, Modernism, Surrealism, Contemporary) with a unique focus on detecting stylistically ambiguous or transitional artworks.
+This project implements a machine learning pipeline for classifying artworks into historical periods (Renaissance, Baroque, Romanticism, Realism, Impressionism, Post-Impressionism, Modernism, Contemporary) with a unique focus on detecting stylistically ambiguous or transitional artworks.
 
 ### Key Features
 
@@ -53,9 +53,9 @@ Code/
 │       ├── logging.py             # Logging utilities
 │       └── reproducibility.py     # Seed setting and reproducibility
 ├── scripts/
-│   ├── train.py                   # Main training script
-│   ├── evaluate.py                # Evaluation script
-│   ├── analyze_ambiguity.py       # Ambiguity analysis script
+│   ├── train.py                   # Main training script (includes evaluation and Grad-CAM)
+│   ├── evaluate.py                # Standalone evaluation script
+│   ├── analyze_ambiguity.py       # Standalone ambiguity analysis script
 │   └── demo.py                    # Streamlit demo application
 ├── notebooks/
 │   ├── data_exploration.ipynb     # Data exploration and analysis
@@ -65,12 +65,15 @@ Code/
 │   ├── app.py                     # Streamlit demo application
 │   ├── model_utils.py             # Demo utilities
 │   └── requirements.txt           # Demo requirements
-├── data/                          # Data directory (to be created)
-├── experiments/                   # Experiment outputs
-├── artifacts/                     # Generated visualizations and results
+├── data/                          # Data directory
+│   ├── wikiart_raw/               # Raw WikiArt dataset downloaded from Kaggle
+│   └── wikiart_real_processed/    # Processed and balanced dataset for training
+├── experiments/                   # Experiment outputs (models, logs, metrics, visualizations)
+├── artifacts/                     # Generated visualizations and results (if used separately)
 ├── requirements.txt               # Main project requirements
-├── environment.yml               # Conda environment specification
-└── README.md                     # This file
+├── environment.yml                # Conda environment specification
+├── create_large_dataset.py        # Script to process and balance the raw WikiArt dataset
+└── README.md                      # This file
 ```
 
 ## Installation
@@ -99,50 +102,58 @@ pip install -r requirements.txt
 
 ### 1. Data Preparation
 
-Download and organize the WikiArt dataset:
+1. **Download the WikiArt dataset:**
+    - Go to [Kaggle: WikiArt Dataset](https://www.kaggle.com/datasets/steubk/wikiart).
+    - Download the dataset.
+2. **Extract the dataset:**
+    - Create a directory named `data/wikiart_raw` in the root of this project.
+    - Extract the contents of the downloaded archive (the various style folders like `Abstract_Expressionism`, `Baroque`, etc.) directly into the `data/wikiart_raw` directory.
+3. **Process and balance the dataset:**
+    - Run the script to organize and balance the dataset for the defined art periods:
 
-```bash
-# Create data directory structure
-mkdir -p data/wikiart_processed/{Renaissance,Baroque,Romanticism,Impressionism,Post-Impressionism,Modernism,Surrealism,Contemporary}
+    ```bash
+    python create_large_dataset.py
+    ```
 
-# Download data (manual process - see data section for details)
-# Organize images into respective art period folders
-```
+    This will populate the `data/wikiart_real_processed` directory, which will be used for training.
 
 ### 2. Training
 
-Train the model using the two-phase fine-tuning approach:
+Train the model using the two-phase fine-tuning approach. The script will automatically evaluate the best model on the test set and save a classification report, confusion matrix, and Grad-CAM visualizations for a few examples in the specified output directory.
 
 ```bash
-python scripts/train.py \
-    --data_dir ./data/wikiart_processed \
-    --output_dir ./experiments/run_001 \
-    --backbone efficientnet_b0 \
-    --batch_size 32 \
-    --phase1_epochs 3 \
-    --phase2_epochs 7 \
+python scripts/train.py \\
+    --data_dir ./data/wikiart_real_processed \\
+    --output_dir ./experiments/run_001 \\
+    --backbone efficientnet_b0 \\
+    --batch_size 32 \\
+    --phase1_epochs 10 \\
+    --phase2_epochs 20 \\
     --use_mixup
 ```
 
-### 3. Evaluation
+* Adjust `output_dir`, `batch_size`, and `epochs` as needed, especially for GPU training.
+- Check the `experiments/run_001` (or your specified output directory) for saved models, logs, evaluation metrics, and Grad-CAM images.
 
-Evaluate the trained model:
+### 3. Evaluation (Standalone)
+
+While the training script performs evaluation, you can also run a standalone evaluation on a trained model:
 
 ```bash
 python scripts/evaluate.py \
     --model_path ./experiments/run_001/checkpoints/best_model.pth \
-    --data_dir ./data/wikiart_processed \
+    --data_dir ./data/wikiart_real_processed \
     --output_dir ./experiments/run_001/evaluation
 ```
 
-### 4. Ambiguity Analysis
+### 4. Ambiguity Analysis (Standalone)
 
-Analyze stylistic ambiguity and generate visualizations:
+Similarly, for more detailed ambiguity analysis or to generate visualizations for specific images:
 
 ```bash
 python scripts/analyze_ambiguity.py \
     --model_path ./experiments/run_001/checkpoints/best_model.pth \
-    --data_dir ./data/wikiart_processed \
+    --data_dir ./data/wikiart_real_processed \
     --output_dir ./experiments/run_001/ambiguity_analysis \
     --generate_gradcam \
     --generate_tsne
@@ -169,8 +180,8 @@ streamlit run app.py
 
 ### Training Strategy
 
-- **Phase 1**: Freeze backbone, train classifier head (3 epochs, lr=1e-3)
-- **Phase 2**: Unfreeze last block, fine-tune (7 epochs, lr=1e-4)
+- **Phase 1**: Freeze backbone, train classifier head (e.g., 10 epochs, lr=1e-3)
+- **Phase 2**: Unfreeze last block, fine-tune (e.g., 20 epochs, lr=1e-4)
 - **Regularization**: Label smoothing (0.1), MixUp (α=0.2), Dropout (0.3)
 - **Optimization**: AdamW + CosineAnnealingLR
 
@@ -185,14 +196,14 @@ streamlit run app.py
 The project uses a comprehensive configuration system. Main configuration options:
 
 ```python
-# Example configuration
+# Example configuration (see src/config/config.py for details)
 config = ProjectConfig(
     data=DataConfig(
-        data_dir="./data/wikiart_processed",
+        data_dir="./data/wikiart_real_processed", # Updated
         batch_size=32,
-        art_periods=["Renaissance", "Baroque", "Romanticism", 
+        art_periods=["Renaissance", "Baroque", "Romanticism", "Realism",
                     "Impressionism", "Post-Impressionism", 
-                    "Modernism", "Surrealism", "Contemporary"]
+                    "Modernism", "Contemporary"] # Updated art periods
     ),
     model=ModelConfig(
         backbone="efficientnet_b0",
@@ -224,10 +235,10 @@ Target metrics based on the 30-day roadmap:
 - Renaissance: ≥300 images
 - Baroque: ≥300 images  
 - Romanticism: ≥300 images
+- Realism: ≥300 images
 - Impressionism: ≥500 images
 - Post-Impressionism: ≥400 images
 - Modernism: ≥400 images
-- Surrealism: ≥300 images
 - Contemporary: ≥300 images
 
 ### Data Sources

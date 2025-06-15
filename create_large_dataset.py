@@ -81,7 +81,7 @@ def map_styles_to_periods():
     }
     return style_mapping
 
-def organize_wikiart_by_periods(raw_data_path: str, target_data_path: str, target_per_class: int = 500):
+def organize_wikiart_by_periods(raw_data_path: str, target_data_path: str, target_per_class: int = 3615): # Updated target_per_class
     """Organize WikiArt images from local source by art periods."""
     
     print(f"🔄 Organizing WikiArt dataset from '{raw_data_path}' into art periods at '{target_data_path}'...")
@@ -179,8 +179,8 @@ def main():
     
     # Configuration
     # target_per_class = 10  # Smallest class count for initial test
-    # target_per_class = 3615 # Minimum count among selected periods for full dataset
-    target_per_class = 300 # For local CPU testing (approx. 2-3 hours)
+    target_per_class = 3615 # Minimum count among selected periods for full dataset
+    # target_per_class = 300 # For local CPU testing (approx. 2-3 hours)
     
     # Ensure this path points to the parent directory of style folders (e.g., data/wikiart/Baroque, data/wikiart/Impressionism)
     raw_data_path = "./data/wikiart"  # Updated path

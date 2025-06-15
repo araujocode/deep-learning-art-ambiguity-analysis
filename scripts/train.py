@@ -12,6 +12,9 @@ import random
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import matplotlib.pyplot as plt # Added
+import seaborn as sns # Added
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score # Added
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -22,6 +25,7 @@ from models.efficientnet_classifier import EfficientNetClassifier
 from training.trainer import Trainer
 from torch.utils.data import DataLoader
 from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam # Was already Added
+from analyze_training import analyze_training_dynamics # Added for post-training analysis
 
 
 def set_seed(seed: int):
@@ -57,7 +61,7 @@ def parse_arguments():
                        help="Training batch size")
     parser.add_argument("--phase1_epochs", type=int, default=10,
                        help="Number of epochs for phase 1 training")
-    parser.add_argument("--phase2_epochs", type=int, default=20,
+    parser.add_argument("--phase2_epochs", type=int, default=40, # Changed from 20 to 40
                        help="Number of epochs for phase 2 training")
     parser.add_argument("--phase1_lr", type=float, default=1e-3,
                        help="Learning rate for phase 1")
@@ -469,6 +473,9 @@ def main():
 
     # Generate Grad-CAM examples
     generate_gradcam_examples(config, best_model_path, test_loader, device, config.data.art_periods, num_examples_per_class=1)
+
+    # Analyze training dynamics
+    analyze_training_dynamics(experiment_dir=config.training.output_dir)
 
 
 if __name__ == "__main__":

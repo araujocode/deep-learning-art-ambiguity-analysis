@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+*.env
+*.env.*
+
+# PyTorch
+*.pt
+*.pth
+*.ckpt
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Data
+/data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Output files
+outputs/
+runs/
+results/
+checkpoints/
+models/
+
+# Image cache or previews
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# Colab
+sample_data/
+
+# Wandb (if used for tracking)
+wandb/
+
+# PyCharm
+.idea/
+
+/data

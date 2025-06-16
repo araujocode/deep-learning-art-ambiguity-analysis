@@ -33,29 +33,15 @@ ENV/
 # Logs
 *.log
 
-# Data
+# Data - Ignoring the entire top-level data directory
 /data/
-datasets/
-*.zip
-*.tar
-*.tar.gz
-*.tgz
 
-# Output files
+# Output files from experiments (but not the images like plots)
 outputs/
 runs/
 results/
-checkpoints/
-models/
 
-# Image cache or previews
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-*.tiff
-*.webp
+checkpoints/
 
 # Temporary files
 *.tmp
@@ -70,5 +56,3 @@ wandb/
 
 # PyCharm
 .idea/
-
-/data

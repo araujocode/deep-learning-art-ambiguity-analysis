@@ -7,25 +7,29 @@ import os
 import sys
 import argparse
 import torch
-import torch.nn.functional as F # Added
+import torch.nn.functional as F 
 import random
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-import matplotlib.pyplot as plt # Added
-import seaborn as sns # Added
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score # Added
+import matplotlib.pyplot as plt 
+import seaborn as sns 
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score 
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
+# Add root to path for analyze_ambiguity
+sys.path.append(str(Path(__file__).parent.parent))
 
-from config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms # create_transforms is here
+
+from config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig, AmbiguityConfig 
+from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms
 from models.efficientnet_classifier import EfficientNetClassifier
 from training.trainer import Trainer
 from torch.utils.data import DataLoader
-from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam # Was already Added
-from analyze_training import analyze_training_dynamics # Added for post-training analysis
+from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam
+from analyze_training import analyze_training_dynamics 
+from analyze_ambiguity import run_ambiguity_analysis 
 
 
 def set_seed(seed: int):
@@ -85,6 +89,16 @@ def parse_arguments():
                        help="Number of workers for data loading")
     parser.add_argument("--device", type=str, default="auto",
                        help="Device to use (cuda/cpu/auto)")
+    
+    # Ambiguity Analysis arguments
+    parser.add_argument("--run_ambiguity_analysis", action="store_true",
+                       help="Run ambiguity analysis after training.")
+    parser.add_argument("--softmax_pmax_threshold", type=float, default=0.6,
+                       help="Ambiguity: Softmax p_max threshold.")
+    parser.add_argument("--softmax_gap_threshold", type=float, default=0.1,
+                       help="Ambiguity: Softmax probability gap threshold.")
+    parser.add_argument("--entropy_percentile_threshold", type=float, default=80.0,
+                       help="Ambiguity: Entropy percentile threshold for calibration.")
     
     return parser.parse_args()
 
@@ -249,23 +263,19 @@ def evaluate_model_after_training(config: ProjectConfig, model_path: str, test_l
     # plt.show() # Optionally show, but usually not needed in automated scripts
     plt.close()
 
+    return model # Return the loaded model for potential reuse
 
-def generate_gradcam_examples(config: ProjectConfig, model_path: str, test_loader: DataLoader, device: torch.device, art_periods: list, num_examples_per_class: int = 1):
-    """Generate Grad-CAM visualizations for a few examples from the test set."""
-    print("\n" + "="*50)
+
+def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, test_loader: DataLoader, device: torch.device, art_periods: list, num_examples_per_class: int = 1):
+    """Generate Grad-CAM visualizations for a few examples from the test set.
+    Accepts a loaded model directly.
+    """
+    print("\\n" + "="*50)
     print("GENERATING GRAD-CAM EXAMPLES")
     print("="*50)
 
-    # Load trained model
-    print(f"Loading best model from: {model_path}")
-    model = EfficientNetClassifier(
-        backbone=config.model.backbone,
-        num_classes=len(art_periods)
-    )
-    checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(device)
-    model.eval()
+    # Model is now passed directly, no need to load it here.
+    model.eval() # Ensure the passed model is in eval mode
 
     # Initialize GradCAMVisualizer
     # Attempt to find a suitable layer automatically; common choices for EfficientNet
@@ -385,6 +395,12 @@ def main():
             device=str(device),
             seed=args.seed,
             output_dir=args.output_dir
+        ),
+        ambiguity=AmbiguityConfig( # Added AmbiguityConfig
+            run_analysis=args.run_ambiguity_analysis,
+            softmax_pmax_threshold=args.softmax_pmax_threshold,
+            softmax_gap_threshold=args.softmax_gap_threshold,
+            entropy_percentile_threshold=args.entropy_percentile_threshold
         )
     )
     
@@ -464,18 +480,41 @@ def main():
     print(f"Total epochs: {summary['total_epochs']}")
     print(f"Final trainable parameters: {summary['parameter_count']['trainable_parameters']:,}")
     
-    print(f"\nTraining completed! Best model saved to:")
+    print(f"\\nTraining completed! Best model saved to:")
     best_model_path = os.path.join(config.training.output_dir, 'checkpoints', 'best_model.pth')
     print(best_model_path)
 
     # Evaluate model on test set after training
-    evaluate_model_after_training(config, best_model_path, test_loader, device, config.data.art_periods)
+    # The model is returned by evaluate_model_after_training
+    evaluated_model = evaluate_model_after_training(config, best_model_path, test_loader, device, config.data.art_periods)
 
-    # Generate Grad-CAM examples
-    generate_gradcam_examples(config, best_model_path, test_loader, device, config.data.art_periods, num_examples_per_class=1)
+    # Generate Grad-CAM examples using the already loaded model
+    if evaluated_model: # Ensure model was loaded successfully
+        generate_gradcam_examples(config, evaluated_model, test_loader, device, config.data.art_periods, num_examples_per_class=1)
+    else:
+        print("Skipping Grad-CAM generation as model could not be loaded/evaluated.")
+
 
     # Analyze training dynamics
     analyze_training_dynamics(experiment_dir=config.training.output_dir)
+
+    # Run Ambiguity Analysis if flagged
+    if config.ambiguity.run_analysis:
+        if evaluated_model: # Reuse the loaded model
+            print("\\n" + "="*50)
+            print("RUNNING AMBIGUITY ANALYSIS")
+            print("="*50)
+            ambiguity_output_dir = Path(config.training.output_dir) / "ambiguity_analysis"
+            run_ambiguity_analysis(
+                config=config, # Pass the full config
+                model=evaluated_model,
+                val_loader=val_loader, # Pass the existing val_loader
+                test_loader=test_loader, # Pass the existing test_loader
+                device=device,
+                ambiguity_output_dir=ambiguity_output_dir
+            )
+        else:
+            print("Skipping ambiguity analysis as the model was not available from evaluation.")
 
 
 if __name__ == "__main__":

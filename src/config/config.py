@@ -72,6 +72,7 @@ class AmbiguityConfig:
     softmax_pmax_threshold: float = 0.5
     softmax_gap_threshold: float = 0.1
     entropy_percentile_threshold: float = 90.0
+    run_analysis: bool = False
     
     # Grad-CAM settings
     target_layer_name: str = "blocks[-1][-1].conv_dw"

@@ -119,7 +119,13 @@ pip install -r requirements.txt
 
 ### 2. Training
 
-Train the model using the two-phase fine-tuning approach. The script will automatically evaluate the best model on the test set and save a classification report, confusion matrix, and Grad-CAM visualizations for a few examples in the specified output directory.
+Train the model using the two-phase fine-tuning approach. The script will automatically:
+
+- Evaluate the best model on the test set.
+- Save a classification report and confusion matrix.
+- Generate Grad-CAM visualizations for a few examples.
+- Optionally, run ambiguity analysis if the `--run_ambiguity_analysis` flag is provided.
+All outputs are saved in the specified output directory.
 
 ```bash
 python scripts/train.py \\
@@ -128,11 +134,16 @@ python scripts/train.py \\
     --backbone efficientnet_b0 \\
     --batch_size 32 \\
     --phase1_epochs 10 \\
-    --phase2_epochs 20 \\
-    --use_mixup
+    --phase2_epochs 40 \\
+    --use_mixup \\
+    --run_ambiguity_analysis # Add this flag to run ambiguity analysis
+#   --softmax_pmax_threshold 0.6 # Optional: customize ambiguity parameters
+#   --softmax_gap_threshold 0.1
+#   --entropy_percentile_threshold 80.0
 ```
 
-* Adjust `output_dir`, `batch_size`, and `epochs` as needed, especially for GPU training.
+- Adjust `output_dir`, `batch_size`, and `epochs` as needed, especially for GPU training.
+
 - Check the `experiments/run_001` (or your specified output directory) for saved models, logs, evaluation metrics, and Grad-CAM images.
 
 ### 3. Evaluation (Standalone)
@@ -148,14 +159,15 @@ python scripts/evaluate.py \
 
 ### 4. Ambiguity Analysis (Standalone)
 
-Similarly, for more detailed ambiguity analysis or to generate visualizations for specific images:
+Ambiguity analysis can be run automatically after training by using the `--run_ambiguity_analysis` flag with `scripts/train.py` (see Training section).
+For standalone, more detailed ambiguity analysis on an existing model, or to re-generate visualizations for specific images without retraining, you can use:
 
 ```bash
-python scripts/analyze_ambiguity.py \
-    --model_path ./experiments/run_001/checkpoints/best_model.pth \
-    --data_dir ./data/wikiart_real_processed \
-    --output_dir ./experiments/run_001/ambiguity_analysis \
-    --generate_gradcam \
+python scripts/analyze_ambiguity.py \\
+    --model_path ./experiments/run_001/checkpoints/best_model.pth \\
+    --data_dir ./data/wikiart_real_processed \\
+    --output_dir ./experiments/run_001/ambiguity_analysis \\
+    --generate_gradcam \\
     --generate_tsne
 ```
 

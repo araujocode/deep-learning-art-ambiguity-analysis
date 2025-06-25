@@ -16,6 +16,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns 
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score 
 from torchvision import transforms
+import os
+import torch
+import numpy as np
+import pandas as pd
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -504,16 +508,13 @@ def main():
     # Load ambiguity scores if provided
     ambiguity_weights = None
     if args.ambiguity_scores_path is not None:
-        import os
-        import torch
-        import numpy as np
+        
         path = args.ambiguity_scores_path
         if path.endswith('.npy'):
             ambiguity_weights = torch.from_numpy(np.load(path)).float()
         elif path.endswith('.pt'):
             ambiguity_weights = torch.load(path)
         elif path.endswith('.csv'):
-            import pandas as pd
             df = pd.read_csv(path)
             # Assume a column 'ambiguity_score' or use the last column
             if 'ambiguity_score' in df.columns:

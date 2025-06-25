@@ -12,6 +12,9 @@ import torch
 import torch.nn.functional as F
 # torchvision.transforms is already imported by `from data.dataset import create_transforms`
 # import numpy as np # Not strictly needed if only using torch tensors for calculations shown
+import random
+from PIL import Image # Ensure PIL is imported here if not globally
+    
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -75,8 +78,6 @@ def download_or_create_sample_images(target_dir="data/sample_test_images"):
 
 def create_synthetic_test_images(data_dir_str):
     """Create synthetic test images if downloads fail."""
-    import random
-    from PIL import Image # Ensure PIL is imported here if not globally
     
     data_dir = Path(data_dir_str)
     synthetic_images_data = [

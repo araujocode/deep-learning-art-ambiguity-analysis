@@ -74,6 +74,10 @@ def parse_arguments():
                        help="Learning rate for phase 2")
     parser.add_argument("--weight_decay", type=float, default=1e-2,
                        help="Weight decay for optimizer")
+    parser.add_argument("--early_stopping_patience_phase1", type=int, default=5,
+                       help="Early stopping patience for phase 1 (head training)")
+    parser.add_argument("--early_stopping_patience_phase2", type=int, default=16,
+                       help="Early stopping patience for phase 2 (fine-tuning)")
     
     # Regularization arguments
     parser.add_argument("--label_smoothing", type=float, default=0.1,
@@ -82,6 +86,16 @@ def parse_arguments():
                        help="Use MixUp augmentation")
     parser.add_argument("--mixup_alpha", type=float, default=0.2,
                        help="MixUp alpha parameter")
+    parser.add_argument("--use_cutmix", action="store_true",
+                       help="Use CutMix augmentation")
+    parser.add_argument("--cutmix_alpha", type=float, default=1.0,
+                       help="CutMix alpha parameter")
+    parser.add_argument("--use_focal_loss", action="store_true",
+                       help="Use Focal Loss instead of CrossEntropyLoss")
+    parser.add_argument("--lr_scheduler", type=str, default="onecycle", choices=["onecycle", "cosine", "plateau"],
+                       help="Learning rate scheduler type")
+    parser.add_argument("--ambiguity_scores_path", type=str, default=None,
+                       help="Path to ambiguity scores file (npy, pt, or csv)")
     
     # Other arguments
     parser.add_argument("--seed", type=int, default=42,
@@ -100,6 +114,10 @@ def parse_arguments():
                        help="Ambiguity: Softmax probability gap threshold.")
     parser.add_argument("--entropy_percentile_threshold", type=float, default=80.0,
                        help="Ambiguity: Entropy percentile threshold for calibration.")
+    
+    # Augmentation arguments
+    parser.add_argument("--use_randaugment", action="store_true", help="Use RandAugment for training augmentations")
+    parser.add_argument("--use_autoaugment", action="store_true", help="Use AutoAugment for training augmentations")
     
     return parser.parse_args()
 
@@ -124,9 +142,17 @@ def create_data_loaders(config: ProjectConfig) -> tuple:
             config.training.seed
         )
     
-    # Create transforms
-    train_transform = create_transforms(config.data.image_size, is_training=True)
-    val_transform = create_transforms(config.data.image_size, is_training=False)
+    # Create transforms with CLI/config toggles
+    train_transform = create_transforms(
+        image_size=config.data.image_size,
+        is_training=True,
+        use_randaugment=getattr(config.data, 'use_randaugment', False),
+        use_autoaugment=getattr(config.data, 'use_autoaugment', False)
+    )
+    val_transform = create_transforms(
+        image_size=config.data.image_size,
+        is_training=False
+    )
     
     # Create datasets
     train_dataset = ArtPeriodDataset(
@@ -416,7 +442,8 @@ def main():
         data=DataConfig(
             data_dir=args.data_dir,
             batch_size=args.batch_size,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            # Optionally add image_size if needed
         ),
         model=ModelConfig(
             backbone=args.backbone,
@@ -428,14 +455,19 @@ def main():
             weight_decay=args.weight_decay,
             label_smoothing=args.label_smoothing,
             use_mixup=args.use_mixup,
-            mixup_alpha=args.mixup_alpha
+            mixup_alpha=args.mixup_alpha,
+            use_cutmix=args.use_cutmix,
+            cutmix_alpha=args.cutmix_alpha,
+            use_focal_loss=args.use_focal_loss,
+            unfreeze_last_n_blocks=2,  # default, can be CLI
+            lr_scheduler=args.lr_scheduler
         ),
         training=TrainingConfig(
             device=str(device),
             seed=args.seed,
             output_dir=args.output_dir
         ),
-        ambiguity=AmbiguityConfig( # Added AmbiguityConfig
+        ambiguity=AmbiguityConfig(
             run_analysis=args.run_ambiguity_analysis,
             softmax_pmax_threshold=args.softmax_pmax_threshold,
             softmax_gap_threshold=args.softmax_gap_threshold,
@@ -469,13 +501,44 @@ def main():
     print(f"Model parameters: {param_count['total_parameters']:,}")
     print(f"Trainable parameters: {param_count['trainable_parameters']:,}")
     
+    # Load ambiguity scores if provided
+    ambiguity_weights = None
+    if args.ambiguity_scores_path is not None:
+        import os
+        import torch
+        import numpy as np
+        path = args.ambiguity_scores_path
+        if path.endswith('.npy'):
+            ambiguity_weights = torch.from_numpy(np.load(path)).float()
+        elif path.endswith('.pt'):
+            ambiguity_weights = torch.load(path)
+        elif path.endswith('.csv'):
+            import pandas as pd
+            df = pd.read_csv(path)
+            # Assume a column 'ambiguity_score' or use the last column
+            if 'ambiguity_score' in df.columns:
+                ambiguity_weights = torch.from_numpy(df['ambiguity_score'].values).float()
+            else:
+                ambiguity_weights = torch.from_numpy(df.iloc[:, -1].values).float()
+        else:
+            print(f"Unknown ambiguity score file format: {path}")
+            ambiguity_weights = None
+        if ambiguity_weights is not None:
+            print(f"Loaded ambiguity weights from {path} (shape: {ambiguity_weights.shape})")
+    
     # Create trainer
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
-        output_dir=config.training.output_dir
+        output_dir=config.training.output_dir,
+        use_mixup=config.model.use_mixup,
+        mixup_alpha=config.model.mixup_alpha,
+        use_cutmix=config.model.use_cutmix,
+        cutmix_alpha=config.model.cutmix_alpha,
+        use_focal_loss=config.model.use_focal_loss,
+        ambiguity_weights=ambiguity_weights
     )
     
     # Training Phase 1: Head-only
@@ -487,7 +550,9 @@ def main():
         num_epochs=config.model.phase1_epochs,
         learning_rate=config.model.phase1_lr,
         weight_decay=config.model.weight_decay,
-        label_smoothing=config.model.label_smoothing
+        label_smoothing=config.model.label_smoothing,
+        lr_scheduler=config.model.lr_scheduler,
+        early_stopping_patience=args.early_stopping_patience_phase1
     )
     
     # Training Phase 2: Unfreeze last block
@@ -500,7 +565,9 @@ def main():
         learning_rate=config.model.phase2_lr,
         weight_decay=config.model.weight_decay,
         label_smoothing=config.model.label_smoothing,
-        unfreeze_last_n_blocks=1
+        unfreeze_last_n_blocks=config.model.unfreeze_last_n_blocks,
+        early_stopping_patience=args.early_stopping_patience_phase2,
+        lr_scheduler=config.model.lr_scheduler
     )
     
     # Save training plots

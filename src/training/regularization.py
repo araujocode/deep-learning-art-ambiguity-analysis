@@ -93,3 +93,37 @@ class LabelSmoothing:
             true_dist.scatter_(1, targets.data.unsqueeze(1), 1.0 - self.smoothing)
         
         return torch.mean(torch.sum(-true_dist * F.log_softmax(predictions, dim=-1), dim=-1))
+
+
+class CutMix:
+    """CutMix data augmentation for regularization."""
+    def __init__(self, alpha: float = 1.0):
+        self.alpha = alpha
+    def __call__(self, x: torch.Tensor, y: torch.Tensor):
+        # Sample lambda from Beta distribution
+        if self.alpha > 0:
+            lam = np.random.beta(self.alpha, self.alpha)
+        else:
+            lam = 1
+        batch_size, _, h, w = x.size()
+        index = torch.randperm(batch_size).to(x.device)
+        # Compute bounding box
+        cut_rat = np.sqrt(1. - lam)
+        cut_w = np.int(w * cut_rat)
+        cut_h = np.int(h * cut_rat)
+        # Uniform center
+        cx = np.random.randint(w)
+        cy = np.random.randint(h)
+        bbx1 = np.clip(cx - cut_w // 2, 0, w)
+        bby1 = np.clip(cy - cut_h // 2, 0, h)
+        bbx2 = np.clip(cx + cut_w // 2, 0, w)
+        bby2 = np.clip(cy + cut_h // 2, 0, h)
+        x_cutmix = x.clone()
+        x_cutmix[:, :, bby1:bby2, bbx1:bbx2] = x[index, :, bby1:bby2, bbx1:bbx2]
+        # Adjust lambda to actual area
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (w * h))
+        y_a, y_b = y, y[index]
+        return x_cutmix, y_a, y_b, lam
+
+def cutmix_criterion(criterion, pred: torch.Tensor, y_a: torch.Tensor, y_b: torch.Tensor, lam: float) -> torch.Tensor:
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)

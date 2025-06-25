@@ -5,14 +5,17 @@ from typing import Dict, List, Tuple, Optional, Callable
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import numpy as np
 from torchmetrics.classification import MulticlassAccuracy, MulticlassCalibrationError
 import matplotlib.pyplot as plt
-from tqdm import tqdm # Import tqdm
+from tqdm import tqdm
 
 from models.efficientnet_classifier import EfficientNetClassifier, ModelManager
+from .regularization import MixUp, mixup_criterion, CutMix, cutmix_criterion
+import torch.nn.functional as F
+from torchvision.transforms import RandAugment, AutoAugment, AutoAugmentPolicy
 
 
 class Trainer:
@@ -25,7 +28,13 @@ class Trainer:
         val_loader: DataLoader,
         device: torch.device,
         output_dir: str,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        use_mixup: bool = False,
+        mixup_alpha: float = 0.2,
+        use_cutmix: bool = False,
+        cutmix_alpha: float = 1.0,
+        use_focal_loss: bool = False,
+        ambiguity_weights: Optional[torch.Tensor] = None
     ):
         """
         Initialize trainer.
@@ -37,6 +46,12 @@ class Trainer:
             device: Device to train on
             output_dir: Directory to save outputs
             logger: Logger instance
+            use_mixup: Whether to use MixUp augmentation
+            mixup_alpha: Alpha value for MixUp
+            use_cutmix: Whether to use CutMix augmentation
+            cutmix_alpha: Alpha value for CutMix
+            use_focal_loss: Whether to use Focal Loss
+            ambiguity_weights: Ambiguity weights for samples (if using Focal Loss)
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -68,6 +83,16 @@ class Trainer:
         
         self.best_val_acc = 0.0
         self.best_epoch = 0
+        
+        # Augmentations
+        self.use_mixup = use_mixup
+        self.mixup_alpha = mixup_alpha
+        self.use_cutmix = use_cutmix
+        self.cutmix_alpha = cutmix_alpha
+        
+        # Focal Loss
+        self.use_focal_loss = use_focal_loss
+        self.ambiguity_weights = ambiguity_weights
     
     def _setup_logger(self) -> logging.Logger:
         """Setup logger for training."""
@@ -95,12 +120,21 @@ class Trainer:
         
         return logger
     
+    def _get_loss(self, label_smoothing: float = 0.1):
+        """Get loss function with optional Focal Loss."""
+        if self.use_focal_loss:
+            return FocalLoss(gamma=2.0, weight=self.ambiguity_weights)
+        else:
+            return nn.CrossEntropyLoss(label_smoothing=label_smoothing, weight=self.ambiguity_weights)
+
     def train_phase1(
         self,
         num_epochs: int = 3,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-2,
-        label_smoothing: float = 0.1
+        label_smoothing: float = 0.1,
+        lr_scheduler: str = "onecycle",
+        early_stopping_patience: int = 5
     ) -> Dict[str, List[float]]:
         """
         Phase 1: Train only the classifier head.
@@ -110,7 +144,9 @@ class Trainer:
             learning_rate: Learning rate for phase 1
             weight_decay: Weight decay
             label_smoothing: Label smoothing factor
-            
+            lr_scheduler: Learning rate scheduler type ('onecycle', 'plateau', or 'cosine')
+            early_stopping_patience: Early stopping patience (epochs)
+        
         Returns:
             Training history for phase 1
         """
@@ -125,15 +161,24 @@ class Trainer:
             lr=learning_rate,
             weight_decay=weight_decay
         )
-        
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=num_epochs,
-            eta_min=1e-6
-        )
+        if lr_scheduler == "onecycle":
+            scheduler = OneCycleLR(
+                optimizer,
+                max_lr=learning_rate,
+                steps_per_epoch=len(self.train_loader),
+                epochs=num_epochs
+            )
+        elif lr_scheduler == "plateau":
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+        else:
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=num_epochs,
+                eta_min=1e-6
+            )
         
         # Loss function
-        criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        criterion = self._get_loss(label_smoothing=label_smoothing)
         
         # Train
         phase1_history = self._train_epochs(
@@ -141,7 +186,8 @@ class Trainer:
             scheduler=scheduler,
             criterion=criterion,
             num_epochs=num_epochs,
-            phase_name="Phase1"
+            phase_name="Phase1",
+            early_stopping_patience=early_stopping_patience
         )
         
         self.logger.info(f"Phase 1 completed. Best val accuracy: {self.best_val_acc:.4f}")
@@ -153,7 +199,9 @@ class Trainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-2,
         label_smoothing: float = 0.1,
-        unfreeze_last_n_blocks: int = 1
+        unfreeze_last_n_blocks: int = 2,
+        early_stopping_patience: int = 12,
+        lr_scheduler: str = "onecycle"
     ) -> Dict[str, List[float]]:
         """
         Phase 2: Unfreeze last blocks and continue training.
@@ -164,6 +212,8 @@ class Trainer:
             weight_decay: Weight decay
             label_smoothing: Label smoothing factor
             unfreeze_last_n_blocks: Number of last blocks to unfreeze
+            early_stopping_patience: Early stopping patience (epochs)
+            lr_scheduler: Learning rate scheduler type ('onecycle', 'plateau', or 'cosine')
             
         Returns:
             Training history for phase 2
@@ -179,23 +229,33 @@ class Trainer:
             lr=learning_rate,
             weight_decay=weight_decay
         )
-        
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=num_epochs,
-            eta_min=1e-6
-        )
+        if lr_scheduler == "onecycle":
+            scheduler = OneCycleLR(
+                optimizer,
+                max_lr=learning_rate,
+                steps_per_epoch=len(self.train_loader),
+                epochs=num_epochs
+            )
+        elif lr_scheduler == "plateau":
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+        else:
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=num_epochs,
+                eta_min=1e-6
+            )
         
         # Loss function
-        criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        criterion = self._get_loss(label_smoothing=label_smoothing)
         
-        # Train
+        # Train with early stopping
         phase2_history = self._train_epochs(
             optimizer=optimizer,
             scheduler=scheduler,
             criterion=criterion,
             num_epochs=num_epochs,
-            phase_name="Phase2"
+            phase_name="Phase2",
+            early_stopping_patience=early_stopping_patience
         )
         
         self.logger.info(f"Phase 2 completed. Best val accuracy: {self.best_val_acc:.4f}")
@@ -207,10 +267,11 @@ class Trainer:
         scheduler: optim.lr_scheduler._LRScheduler,
         criterion: nn.Module,
         num_epochs: int,
-        phase_name: str
+        phase_name: str,
+        early_stopping_patience: int = None
     ) -> Dict[str, List[float]]:
         """
-        Train for specified number of epochs.
+        Train for specified number of epochs, with optional early stopping.
         
         Args:
             optimizer: Optimizer instance
@@ -218,6 +279,7 @@ class Trainer:
             criterion: Loss function
             num_epochs: Number of epochs to train
             phase_name: Name of the training phase
+            early_stopping_patience: Early stopping patience (epochs)
             
         Returns:
             Training history
@@ -232,6 +294,7 @@ class Trainer:
         }
         
         best_val_acc = 0.0  # Initialize best_val_acc here
+        epochs_since_improvement = 0
         
         for epoch in range(num_epochs):
             epoch_start_time = time.time()
@@ -273,8 +336,11 @@ class Trainer:
                     epoch=self.best_epoch,
                     metrics={'val_loss': val_loss, 'val_acc': val_acc}
                 )
+                epochs_since_improvement = 0
             else:
-                self.logger.info(f"Validation accuracy did not improve from {self.best_val_acc:.4f}.") # Corrected to use self.best_val_acc
+                self.logger.info(f"Validation accuracy did not improve from {self.best_val_acc:.4f}.")
+                epochs_since_improvement += 1
+            
             # Save checkpoint
             current_overall_epoch = epoch + len(self.history['val_acc']) - len(phase_history['val_acc'])
             self.model_manager.save_checkpoint(
@@ -300,6 +366,11 @@ class Trainer:
                 f"LR: {current_lr:.6f}, Duration: {epoch_duration:.2f}s"
             )
             
+            # Early stopping check
+            if early_stopping_patience is not None and epochs_since_improvement >= early_stopping_patience:
+                self.logger.info(f"Early stopping triggered after {epoch+1} epochs with no improvement in validation accuracy for {early_stopping_patience} epochs.")
+                break
+            
         return phase_history
 
     def _train_epoch(
@@ -314,25 +385,28 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         self.accuracy_metric.reset()
-        
-        # Add tqdm progress bar
         progress_bar = tqdm(self.train_loader, desc=f"{phase_name} Epoch {current_epoch}/{total_epochs} [Training]", unit="batch")
-
+        mixup = MixUp(self.mixup_alpha) if self.use_mixup else None
+        cutmix = CutMix(self.cutmix_alpha) if self.use_cutmix else None
         for inputs, labels in progress_bar:
             inputs, labels = inputs.to(self.device), labels.to(self.device)
-            
             optimizer.zero_grad()
-            outputs = self.model(inputs)
-            loss = criterion(outputs, labels)
+            if self.use_cutmix:
+                cutmix_x, y_a, y_b, lam = cutmix(inputs, labels)
+                outputs = self.model(cutmix_x)
+                loss = cutmix_criterion(criterion, outputs, y_a, y_b, lam)
+            elif self.use_mixup:
+                mixed_x, y_a, y_b, lam = mixup(inputs, labels)
+                outputs = self.model(mixed_x)
+                loss = mixup_criterion(criterion, outputs, y_a, y_b, lam)
+            else:
+                outputs = self.model(inputs)
+                loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            
             total_loss += loss.item() * inputs.size(0)
             self.accuracy_metric.update(outputs, labels)
-            
-            # Update progress bar description
             progress_bar.set_postfix(loss=loss.item(), acc=self.accuracy_metric.compute().item())
-
         avg_loss = total_loss / len(self.train_loader.dataset)
         avg_acc = self.accuracy_metric.compute().item()
         return avg_loss, avg_acc
@@ -454,3 +528,44 @@ class Trainer:
             'total_epochs': len(self.history['train_loss']),
             'parameter_count': self.model.get_parameter_count()
         }
+
+# Focal Loss implementation
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, weight=None, reduction='mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+        self.reduction = reduction
+    def forward(self, input, target):
+        logpt = F.log_softmax(input, dim=1)
+        pt = torch.exp(logpt)
+        logpt = logpt.gather(1, target.unsqueeze(1)).squeeze(1)
+        pt = pt.gather(1, target.unsqueeze(1)).squeeze(1)
+        loss = -((1 - pt) ** self.gamma) * logpt
+        if self.weight is not None:
+            loss = loss * self.weight[target]
+        if self.reduction == 'mean':
+            return loss.mean()
+        else:
+            return loss.sum()
+
+class AmbiguityWeightedLoss(nn.Module):
+    """Downweight ambiguous samples using ambiguity scores."""
+    def __init__(self, base_loss, ambiguity_scores: torch.Tensor, min_weight: float = 0.3):
+        super().__init__()
+        self.base_loss = base_loss
+        self.ambiguity_scores = ambiguity_scores
+        self.min_weight = min_weight
+    def forward(self, input, target, indices=None):
+        # indices: batch indices in the original dataset
+        if indices is not None:
+            weights = 1.0 - self.ambiguity_scores[indices].to(input.device)
+            weights = torch.clamp(weights, min=self.min_weight, max=1.0)
+        else:
+            weights = torch.ones(input.size(0), device=input.device)
+        loss = self.base_loss(input, target)
+        if loss.dim() > 0:
+            loss = loss * weights
+            return loss.mean()
+        else:
+            return loss

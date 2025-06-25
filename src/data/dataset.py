@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.transforms import RandAugment, AutoAugment, AutoAugmentPolicy
 import numpy as np
 from sklearn.model_selection import train_test_split
 
@@ -160,39 +161,26 @@ class DatasetSplitter:
         )
 
 
-def create_transforms(image_size: int = 224, is_training: bool = True) -> transforms.Compose:
-    """
-    Create image transformations for training or validation.
-    """
+def create_transforms(image_size: int = 224, is_training: bool = True, use_randaugment: bool = True, use_autoaugment: bool = False) -> transforms.Compose:
+    """Create image transformations for training or evaluation."""
+    transform_list = []
     if is_training:
-        transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0)),  # More aggressive crop
+        # Stronger augmentations
+        if use_randaugment:
+            transform_list.append(RandAugment())
+        elif use_autoaugment:
+            transform_list.append(AutoAugment(policy=AutoAugmentPolicy.IMAGENET))
+        transform_list += [
+            transforms.RandomResizedCrop(image_size, scale=(0.6, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(
-                brightness=0.3,  # Stronger augmentation
-                contrast=0.3,
-                saturation=0.3,
-                hue=0.08
-            ),
-            transforms.RandomGrayscale(p=0.15),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+            transforms.RandomGrayscale(p=0.1),
+        ]
     else:
-        transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
-    return transform
+        transform_list.append(transforms.Resize((image_size, image_size)))
+    transform_list.append(transforms.ToTensor())
+    transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+    return transforms.Compose(transform_list)
 
 
 def create_tta_transforms(image_size: int = 224, n: int = 5) -> list:

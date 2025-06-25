@@ -44,12 +44,17 @@ class ModelConfig:
     phase2_epochs: int = 80 # More epochs for full model
     phase1_lr: float = 1e-3
     phase2_lr: float = 5e-5  # Lower learning rate for fine-tuning
-    weight_decay: float = 5e-3  # Slightly lower weight decay
+    weight_decay: float = 0.05  # Increased weight decay
     
     # Regularization
-    label_smoothing: float = 0.2  # More label smoothing
-    use_mixup: bool = False  # Try disabling mixup for now
+    label_smoothing: float = 0.2  # Increased label smoothing
+    use_mixup: bool = True
     mixup_alpha: float = 0.2
+    use_cutmix: bool = False
+    cutmix_alpha: float = 1.0
+    use_focal_loss: bool = True
+    unfreeze_last_n_blocks: int = 2  # Default to 2, can try 3-4
+    lr_scheduler: str = "onecycle"  # Options: 'cosine', 'onecycle', 'plateau'
 
 
 @dataclass

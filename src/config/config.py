@@ -7,13 +7,13 @@ import torch
 @dataclass
 class DataConfig:
     """Configuration for data handling."""
-    data_dir: str = "./data/wikiart_real_processed"  # Updated path
+    data_dir: str = "./data/wikiart_real_processed"
     image_size: int = 224
-    batch_size: int = 32
+    batch_size: int = 24  # Lower batch size for larger model
     num_workers: int = 4
     train_split: float = 0.7
-    val_split: float = 0.15
-    test_split: float = 0.15
+    val_split: float = 0.2  # Larger validation set
+    test_split: float = 0.1
     
     # Art periods to classify
     art_periods: List[str] = field(default_factory=lambda: [
@@ -34,21 +34,21 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Configuration for model architecture."""
-    backbone: str = "efficientnet_b0"
+    backbone: str = "efficientnet_b2"  # Using a larger model
     pretrained: bool = True
     num_classes: int = 8 # Adjusted from 7 to 8 (Realism added)
-    dropout_rate: float = 0.3
+    dropout_rate: float = 0.4  # More regularization
     
     # Fine-tuning phases
-    phase1_epochs: int = 3  # Fine-tuning the head
-    phase2_epochs: int = 5 # Fine-tuning the entire model
+    phase1_epochs: int = 20  # More epochs for head
+    phase2_epochs: int = 80 # More epochs for full model
     phase1_lr: float = 1e-3
-    phase2_lr: float = 1e-4
-    weight_decay: float = 1e-2
+    phase2_lr: float = 5e-5  # Lower learning rate for fine-tuning
+    weight_decay: float = 5e-3  # Slightly lower weight decay
     
     # Regularization
-    label_smoothing: float = 0.1
-    use_mixup: bool = True
+    label_smoothing: float = 0.2  # More label smoothing
+    use_mixup: bool = False  # Try disabling mixup for now
     mixup_alpha: float = 0.2
 
 
@@ -69,9 +69,9 @@ class TrainingConfig:
 @dataclass
 class AmbiguityConfig:
     """Configuration for ambiguity detection."""
-    softmax_pmax_threshold: float = 0.5
+    softmax_pmax_threshold: float = 0.6
     softmax_gap_threshold: float = 0.1
-    entropy_percentile_threshold: float = 90.0
+    entropy_percentile_threshold: float = 80.0
     run_analysis: bool = False
     
     # Grad-CAM settings

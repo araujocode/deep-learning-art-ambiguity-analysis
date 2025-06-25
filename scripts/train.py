@@ -15,6 +15,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt 
 import seaborn as sns 
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score 
+from torchvision import transforms
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -23,7 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 
 from config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig, AmbiguityConfig 
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms
+from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, create_tta_transforms
 from models.efficientnet_classifier import EfficientNetClassifier
 from training.trainer import Trainer
 from torch.utils.data import DataLoader
@@ -357,6 +358,44 @@ def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, tes
     print(f"Grad-CAM example generation complete. Images saved in {output_gradcam_dir}")
 
 
+def tta_evaluate(model, dataset, device, art_periods, n_tta=5, batch_size=32):
+    """
+    Run Test-Time Augmentation (TTA) evaluation on a dataset.
+    Args:
+        model: Trained model.
+        dataset: ArtPeriodDataset (test set).
+        device: torch.device.
+        art_periods: List of class names.
+        n_tta: Number of TTA augmentations per image.
+        batch_size: Batch size for evaluation.
+    Returns:
+        TTA accuracy (float)
+    """
+    model.eval()
+    tta_transforms = create_tta_transforms(dataset.transform.transforms[1].size, n=n_tta)
+    all_labels = []
+    all_probs = []
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    with torch.no_grad():
+        for img, label in tqdm(loader, desc="TTA Evaluation"):
+            img = img.squeeze(0)  # Remove batch dim
+            tta_preds = []
+            for t in tta_transforms:
+                aug_img = t(transforms.ToPILImage()(img.cpu()))
+                aug_img = aug_img.unsqueeze(0).to(device)
+                out = model(aug_img)
+                prob = torch.softmax(out, dim=1).cpu().numpy()
+                tta_preds.append(prob)
+            avg_prob = np.mean(tta_preds, axis=0)
+            all_probs.append(avg_prob)
+            all_labels.append(label.item())
+    all_probs = np.concatenate(all_probs, axis=0)
+    preds = np.argmax(all_probs, axis=1)
+    acc = (preds == np.array(all_labels)).mean()
+    print(f"\n🎯 TTA TEST SET ACCURACY: {acc:.4f} ({acc*100:.2f}%)")
+    return acc
+
+
 def main():
     """Main training function."""
     args = parse_arguments()
@@ -488,6 +527,15 @@ def main():
     # The model is returned by evaluate_model_after_training
     evaluated_model = evaluate_model_after_training(config, best_model_path, test_loader, device, config.data.art_periods)
 
+    # TTA evaluation on test set
+    if evaluated_model:
+        print("\n" + "="*50)
+        print("RUNNING TEST-TIME AUGMENTATION (TTA) ON TEST SET")
+        print("="*50)
+        tta_acc = tta_evaluate(evaluated_model, test_loader.dataset, device, config.data.art_periods, n_tta=5, batch_size=config.data.batch_size)
+    else:
+        print("Skipping TTA evaluation as model could not be loaded/evaluated.")
+
     # Generate Grad-CAM examples using the already loaded model
     if evaluated_model: # Ensure model was loaded successfully
         generate_gradcam_examples(config, evaluated_model, test_loader, device, config.data.art_periods, num_examples_per_class=1)
@@ -508,8 +556,8 @@ def main():
             run_ambiguity_analysis(
                 config=config, # Pass the full config
                 model=evaluated_model,
-                val_loader=val_loader, # Pass the existing val_loader
-                test_loader=test_loader, # Pass the existing test_loader
+                val_loader=val_loader,
+                test_loader=test_loader,
                 device=device,
                 ambiguity_output_dir=ambiguity_output_dir
             )

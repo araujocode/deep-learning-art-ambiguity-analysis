@@ -163,26 +163,19 @@ class DatasetSplitter:
 def create_transforms(image_size: int = 224, is_training: bool = True) -> transforms.Compose:
     """
     Create image transformations for training or validation.
-    
-    Args:
-        image_size: Target image size
-        is_training: Whether to apply training augmentations
-        
-    Returns:
-        Composed transformations
     """
     if is_training:
         transform = transforms.Compose([
             transforms.Resize(256),
-            transforms.RandomResizedCrop(image_size, scale=(0.6, 1.0)),
+            transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0)),  # More aggressive crop
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(
-                brightness=0.2,
-                contrast=0.2,
-                saturation=0.2,
-                hue=0.05
+                brightness=0.3,  # Stronger augmentation
+                contrast=0.3,
+                saturation=0.3,
+                hue=0.08
             ),
-            transforms.RandomGrayscale(p=0.1),
+            transforms.RandomGrayscale(p=0.15),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -199,5 +192,36 @@ def create_transforms(image_size: int = 224, is_training: bool = True) -> transf
                 std=[0.229, 0.224, 0.225]
             )
         ])
-    
     return transform
+
+
+def create_tta_transforms(image_size: int = 224, n: int = 5) -> list:
+    """
+    Create a list of image transformations for Test-Time Augmentation (TTA).
+    Args:
+        image_size: Target image size for the model.
+        n: Number of TTA transforms to generate.
+    Returns:
+        List of torchvision transforms.Compose objects.
+    """
+    tta_transforms = []
+    for _ in range(n):
+        tta_transforms.append(
+            transforms.Compose([
+                transforms.Resize(256),
+                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(
+                    brightness=0.2,
+                    contrast=0.2,
+                    saturation=0.2,
+                    hue=0.05
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ])
+        )
+    return tta_transforms

@@ -109,8 +109,8 @@ class CutMix:
         index = torch.randperm(batch_size).to(x.device)
         # Compute bounding box
         cut_rat = np.sqrt(1. - lam)
-        cut_w = np.int(w * cut_rat)
-        cut_h = np.int(h * cut_rat)
+        cut_w = int(w * cut_rat)
+        cut_h = int(h * cut_rat)
         # Uniform center
         cx = np.random.randint(w)
         cy = np.random.randint(h)

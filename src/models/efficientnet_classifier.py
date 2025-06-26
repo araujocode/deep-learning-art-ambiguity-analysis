@@ -104,24 +104,14 @@ class EfficientNetClassifier(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = True
     
-    def freeze_early_layers(self, unfreeze_last_n_blocks: int = 1):
-        """
-        Freeze early layers, keep last n blocks unfrozen.
-        
-        Args:
-            unfreeze_last_n_blocks: Number of last blocks to keep unfrozen
-        """
-        # Freeze all backbone parameters first
+    def freeze_blocks(self, n: int):
+        """Freeze all but the last n blocks of the backbone."""
         self.freeze_backbone()
-        
-        # Unfreeze last n blocks
         if hasattr(self.backbone, 'blocks'):
-            blocks_to_unfreeze = self.backbone.blocks[-unfreeze_last_n_blocks:]
+            blocks_to_unfreeze = self.backbone.blocks[-n:]
             for block in blocks_to_unfreeze:
                 for param in block.parameters():
                     param.requires_grad = True
-        
-        # Always keep classifier unfrozen
         for param in self.classifier.parameters():
             param.requires_grad = True
     

@@ -310,3 +310,69 @@ This project is developed for academic purposes as part of a Machine Learning co
 ---
 
 For detailed implementation notes and academic context, see the original 30-day roadmap document included in this repository.
+
+## Command-Line Interface (CLI) Options
+
+The main training script `scripts/train.py` supports the following CLI arguments:
+
+**Data arguments:**
+- `--data_dir` (str, required): Path to the dataset directory
+- `--output_dir` (str, default: ./experiments/run_001): Output directory for experiments
+
+**Model arguments:**
+- `--backbone` (str, default: efficientnet_b0): EfficientNet backbone to use (choices: efficientnet_b0, efficientnet_b1, efficientnet_b2, efficientnet_b3, efficientnet_b4)
+- `--dropout_rate` (float, default: 0.3): Dropout rate before classifier
+
+**Training arguments:**
+- `--batch_size` (int, default: 32): Training batch size
+- `--phase1_epochs` (int, default: 10): Number of epochs for phase 1 training
+- `--phase2_epochs` (int, default: 40): Number of epochs for phase 2 training
+- `--stage1_epochs` (int, default: 10): Epochs for phase 2 stage 1 (last 2 blocks, progressive unfreezing)
+- `--stage2_epochs` (int, default: 10): Epochs for phase 2 stage 2 (last 4 blocks, progressive unfreezing)
+- `--stage3_epochs` (int, default: 20): Epochs for phase 2 stage 3 (full unfreeze, progressive unfreezing)
+- `--phase1_lr` (float, default: 1e-3): Learning rate for phase 1
+- `--phase2_lr` (float, default: 1e-4): Learning rate for phase 2
+- `--weight_decay` (float, default: 1e-2): Weight decay for optimizer
+- `--early_stopping_patience_phase1` (int, default: 5): Early stopping patience for phase 1
+- `--early_stopping_patience_phase2` (int, default: 16): Early stopping patience for phase 2
+
+**Regularization & Augmentation:**
+- `--label_smoothing` (float, default: 0.1): Label smoothing factor
+- `--use_mixup` (flag): Use MixUp augmentation
+- `--mixup_alpha` (float, default: 0.2): MixUp alpha parameter
+- `--use_cutmix` (flag): Use CutMix augmentation
+- `--cutmix_alpha` (float, default: 1.0): CutMix alpha parameter
+- `--use_focal_loss` (flag): Use Focal Loss instead of CrossEntropyLoss
+- `--use_randaugment` (flag): Use RandAugment for training augmentations
+- `--use_autoaugment` (flag): Use AutoAugment for training augmentations
+- `--use_random_erasing` (flag): Use Random Erasing for training augmentations
+
+**Fine-tuning schedule:**
+- `--progressive_unfreezing` (flag): Use progressive unfreezing schedule in phase 2 (recommended)
+
+**Ambiguity Analysis:**
+- `--ambiguity_scores_path` (str): Path to ambiguity scores file (npy, pt, or csv)
+- `--run_ambiguity_analysis` (flag): Run ambiguity analysis after training
+- `--softmax_pmax_threshold` (float, default: 0.6): Ambiguity: Softmax p_max threshold
+- `--softmax_gap_threshold` (float, default: 0.1): Ambiguity: Softmax probability gap threshold
+- `--entropy_percentile_threshold` (float, default: 80.0): Ambiguity: Entropy percentile threshold for calibration
+
+**Other arguments:**
+- `--seed` (int, default: 42): Random seed for reproducibility
+- `--num_workers` (int, default: 4): Number of workers for data loading
+- `--device` (str, default: auto): Device to use (cuda/cpu/auto)
+
+---
+
+Example usage:
+```bash
+python scripts/train.py \
+  --data_dir ./data/wikiart_real_processed \
+  --output_dir ./experiments/my_run \
+  --backbone efficientnet_b2 \
+  --batch_size 32 \
+  --use_mixup --use_randaugment --use_random_erasing \
+  --progressive_unfreezing --stage1_epochs 10 --stage2_epochs 10 --stage3_epochs 20
+```
+
+---

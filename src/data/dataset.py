@@ -161,7 +161,7 @@ class DatasetSplitter:
         )
 
 
-def create_transforms(image_size: int = 224, is_training: bool = True, use_randaugment: bool = True, use_autoaugment: bool = False) -> transforms.Compose:
+def create_transforms(image_size: int = 224, is_training: bool = True, use_randaugment: bool = True, use_autoaugment: bool = False, use_random_erasing: bool = True) -> transforms.Compose:
     """Create image transformations for training or evaluation."""
     transform_list = []
     if is_training:
@@ -180,6 +180,9 @@ def create_transforms(image_size: int = 224, is_training: bool = True, use_randa
         transform_list.append(transforms.Resize((image_size, image_size)))
     transform_list.append(transforms.ToTensor())
     transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+    # Add RandomErasing after normalization (only for training)
+    if is_training and use_random_erasing:
+        transform_list.append(transforms.RandomErasing(p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3), value='random'))
     return transforms.Compose(transform_list)
 
 

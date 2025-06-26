@@ -16,10 +16,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns 
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score 
 from torchvision import transforms
-import os
-import torch
-import numpy as np
-import pandas as pd
+from sklearn.utils.class_weight import compute_class_weight
+import pandas as pd # Added import for pandas
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -72,6 +70,9 @@ def parse_arguments():
                        help="Number of epochs for phase 1 training")
     parser.add_argument("--phase2_epochs", type=int, default=40, # Changed from 20 to 40
                        help="Number of epochs for phase 2 training")
+    parser.add_argument("--stage1_epochs", type=int, default=10, help="Epochs for phase 2 stage 1 (last 2 blocks)")
+    parser.add_argument("--stage2_epochs", type=int, default=10, help="Epochs for phase 2 stage 2 (last 4 blocks)")
+    parser.add_argument("--stage3_epochs", type=int, default=20, help="Epochs for phase 2 stage 3 (full unfreeze)")
     parser.add_argument("--phase1_lr", type=float, default=1e-3,
                        help="Learning rate for phase 1")
     parser.add_argument("--phase2_lr", type=float, default=1e-4,
@@ -122,11 +123,16 @@ def parse_arguments():
     # Augmentation arguments
     parser.add_argument("--use_randaugment", action="store_true", help="Use RandAugment for training augmentations")
     parser.add_argument("--use_autoaugment", action="store_true", help="Use AutoAugment for training augmentations")
+    parser.add_argument("--use_random_erasing", action="store_true", help="Use Random Erasing for training augmentations")
+    
+    # New arguments
+    parser.add_argument("--progressive_unfreezing", action="store_true", help="Use progressive unfreezing schedule in phase 2 (recommended)")
+    parser.add_argument("--deterministic", action="store_true", help="Enable deterministic training (slower, for debugging)")
     
     return parser.parse_args()
 
 
-def create_data_loaders(config: ProjectConfig) -> tuple:
+def create_data_loaders(config: ProjectConfig, train_transform, val_transform) -> tuple:
     """Create training, validation, and test data loaders."""
     
     # Load and split data
@@ -145,18 +151,6 @@ def create_data_loaders(config: ProjectConfig) -> tuple:
             config.data.test_split,
             config.training.seed
         )
-    
-    # Create transforms with CLI/config toggles
-    train_transform = create_transforms(
-        image_size=config.data.image_size,
-        is_training=True,
-        use_randaugment=getattr(config.data, 'use_randaugment', False),
-        use_autoaugment=getattr(config.data, 'use_autoaugment', False)
-    )
-    val_transform = create_transforms(
-        image_size=config.data.image_size,
-        is_training=False
-    )
     
     # Create datasets
     train_dataset = ArtPeriodDataset(
@@ -437,9 +431,11 @@ def main():
         device = torch.device(args.device)
     
     print(f"Using device: {device}")
-    
     # Set seed for reproducibility
     set_seed(args.seed)
+    if not args.deterministic:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
     
     # Create configuration
     config = ProjectConfig(
@@ -483,9 +479,28 @@ def main():
     os.makedirs(config.training.output_dir, exist_ok=True)
     os.makedirs(os.path.join(config.training.output_dir, "checkpoints"), exist_ok=True)
     
+    # Create transforms with CLI/config toggles
+    train_transform = create_transforms(
+        image_size=config.data.image_size,
+        is_training=True,
+        use_randaugment=args.use_randaugment,
+        use_autoaugment=args.use_autoaugment,
+        use_random_erasing=args.use_random_erasing
+    )
+    val_transform = create_transforms(
+        image_size=config.data.image_size,
+        is_training=False
+    )
     # Create data loaders
     print("Creating data loaders...")
-    train_loader, val_loader, test_loader = create_data_loaders(config)
+    train_loader, val_loader, test_loader = create_data_loaders(config, train_transform, val_transform)
+    
+    # Compute class weights from training labels
+    train_labels = []
+    for _, labels in train_loader:
+        train_labels.extend(labels.cpu().numpy())
+    class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
+    class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
     
     print(f"Training samples: {len(train_loader.dataset)}")
     print(f"Validation samples: {len(val_loader.dataset)}")
@@ -494,10 +509,9 @@ def main():
     # Create model
     print(f"Creating {config.model.backbone} model...")
     model = EfficientNetClassifier(
-        backbone=config.model.backbone,
-        num_classes=config.model.num_classes,
-        pretrained=True,
-        dropout_rate=config.model.dropout_rate
+        backbone=args.backbone,
+        num_classes=len(config.data.art_periods),
+        dropout_rate=args.dropout_rate
     )
     
     # Print model info
@@ -533,14 +547,16 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
-        output_dir=config.training.output_dir,
-        use_mixup=config.model.use_mixup,
-        mixup_alpha=config.model.mixup_alpha,
-        use_cutmix=config.model.use_cutmix,
-        cutmix_alpha=config.model.cutmix_alpha,
-        use_focal_loss=config.model.use_focal_loss,
-        ambiguity_weights=ambiguity_weights
+        output_dir=args.output_dir,
+        logger=None,
+        use_mixup=args.use_mixup,
+        mixup_alpha=args.mixup_alpha,
+        use_cutmix=args.use_cutmix,
+        cutmix_alpha=args.cutmix_alpha,
+        use_focal_loss=args.use_focal_loss
     )
+    # Set class weights in trainer
+    trainer.set_class_weights(class_weights)
     
     # Training Phase 1: Head-only
     print("\n" + "="*50)
@@ -556,20 +572,32 @@ def main():
         early_stopping_patience=args.early_stopping_patience_phase1
     )
     
-    # Training Phase 2: Unfreeze last block
+    # Training Phase 2: Unfreeze last block or progressive unfreezing
     print("\n" + "="*50)
     print("PHASE 2: FINE-TUNING WITH UNFROZEN LAYERS")
     print("="*50)
-    
-    phase2_history = trainer.train_phase2(
-        num_epochs=config.model.phase2_epochs,
-        learning_rate=config.model.phase2_lr,
-        weight_decay=config.model.weight_decay,
-        label_smoothing=config.model.label_smoothing,
-        unfreeze_last_n_blocks=config.model.unfreeze_last_n_blocks,
-        early_stopping_patience=args.early_stopping_patience_phase2,
-        lr_scheduler=config.model.lr_scheduler
-    )
+
+    if args.progressive_unfreezing:
+        phase2_history = trainer.train_phase2_progressive(
+            total_epochs=args.stage1_epochs + args.stage2_epochs + args.stage3_epochs,
+            stage1_epochs=args.stage1_epochs,
+            stage2_epochs=args.stage2_epochs,
+            stage3_epochs=args.stage3_epochs,
+            weight_decay=config.model.weight_decay,
+            label_smoothing=config.model.label_smoothing,
+            early_stopping_patience=args.early_stopping_patience_phase2,
+            lr_scheduler=config.model.lr_scheduler
+        )
+    else:
+        phase2_history = trainer.train_phase2(
+            num_epochs=config.model.phase2_epochs,
+            learning_rate=config.model.phase2_lr,
+            weight_decay=config.model.weight_decay,
+            label_smoothing=config.model.label_smoothing,
+            unfreeze_last_n_blocks=config.model.unfreeze_last_n_blocks,
+            early_stopping_patience=args.early_stopping_patience_phase2,
+            lr_scheduler=config.model.lr_scheduler
+        )
     
     # Save training plots
     print("\nGenerating training plots...")

@@ -59,6 +59,7 @@ class Trainer:
         self.device = device
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True) # Ensure output directory exists
+        os.makedirs(os.path.join(self.output_dir, "checkpoints"), exist_ok=True) # Ensure checkpoints directory exists
         self.logger = logger or self._setup_logger()
         
         self.model_manager = ModelManager(model)
@@ -332,7 +333,7 @@ class Trainer:
                 self.best_epoch = epoch + len(self.history['val_acc']) - len(phase_history['val_acc']) # Adjust epoch number for overall history
                 self.logger.info(f"New best validation accuracy: {val_acc:.4f}. Saving model...")
                 self.model_manager.save_checkpoint(
-                    filepath=os.path.join(self.output_dir, 'best_model.pth'),
+                    filepath=os.path.join(self.output_dir, 'checkpoints', 'best_model.pth'),
                     epoch=self.best_epoch,
                     metrics={'val_loss': val_loss, 'val_acc': val_acc}
                 )
@@ -344,7 +345,7 @@ class Trainer:
             # Save checkpoint
             current_overall_epoch = epoch + len(self.history['val_acc']) - len(phase_history['val_acc'])
             self.model_manager.save_checkpoint(
-                filepath=os.path.join(self.output_dir, 'latest_checkpoint.pth'),
+                filepath=os.path.join(self.output_dir, 'checkpoints', 'latest_checkpoint.pth'),
                 epoch=current_overall_epoch,
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),

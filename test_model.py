@@ -5,7 +5,6 @@ Downloads a few sample art images, tests inference, and shows basic ambiguity.
 """
 
 import os
-import sys
 import requests
 from PIL import Image
 import torch
@@ -14,15 +13,11 @@ import torch.nn.functional as F
 # import numpy as np # Not strictly needed if only using torch tensors for calculations shown
 import random
 from PIL import Image # Ensure PIL is imported here if not globally
-    
 
-# Add src to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
-from src.config.config import ProjectConfig, AmbiguityConfig # AmbiguityConfig might be needed if detector uses it directly
+from src.config.config import ProjectConfig, AmbiguityConfig
 from src.models.efficientnet_classifier import EfficientNetClassifier
-from src.data.dataset import create_transforms # For preprocessing
-from src.ambiguity.detector import AmbiguityDetector # For ambiguity check
+from src.data.dataset import create_transforms
+from src.ambiguity.detector import AmbiguityDetector
 
 def download_or_create_sample_images(target_dir="data/sample_test_images"):
     """
@@ -156,7 +151,7 @@ def test_and_demo_model():
             num_classes=len(art_periods)
         )
         checkpoint = torch.load(model_path, map_location='cpu')
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['state_dict'])
         model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)

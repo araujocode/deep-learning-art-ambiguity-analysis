@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 from typing import Optional, Callable, List, Dict, Tuple
 from PIL import Image
 import torch
@@ -49,55 +48,62 @@ class ArtPeriodDataset(Dataset):
             self.image_paths, self.labels = self._load_data()
     
     def _load_data(self) -> Tuple[List[str], List[int]]:
-        """Load image paths and labels from directory structure."""
+        """Load image paths and labels from directory structure, skipping unreadable files."""
         image_paths = []
         labels = []
-        
         for period in self.art_periods:
             period_dir = os.path.join(self.data_dir, period)
             if not os.path.exists(period_dir):
                 print(f"Warning: Directory {period_dir} not found")
                 continue
-            
             label = self.period_to_idx[period]
-            
             for filename in os.listdir(period_dir):
                 if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
-                    image_paths.append(os.path.join(period_dir, filename))
-                    labels.append(label)
-        
+                    img_path = os.path.join(period_dir, filename)
+                    try:
+                        with Image.open(img_path) as img:
+                            img.verify()  # Verify image is not corrupt
+                        image_paths.append(img_path)
+                        labels.append(label)
+                    except Exception as e:
+                        print(f"Warning: Skipping unreadable image {img_path}: {e}")
         return image_paths, labels
     
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
         return len(self.image_paths)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int):
         """
-        Get a sample from the dataset.
-        
-        Args:
-            idx: Sample index
-            
-        Returns:
-            Tuple of (image_tensor, label)
+        Get a sample from the dataset. If loading or transform fails, retry with a random index.
+        If all attempts fail, return a CorruptSampleException object (do not raise).
+        Returns (image, label, idx) where idx is the original dataset index.
         """
-        image_path = self.image_paths[idx]
-        label = self.labels[idx]
-        
-        # Load image
-        try:
-            image = Image.open(image_path).convert('RGB')
-        except Exception as e:
-            print(f"Error loading image {image_path}: {e}")
-            # Return a black image as fallback
-            image = Image.new('RGB', (224, 224), color='black')
-        
-        # Apply transformations
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, label
+        max_attempts = 3
+        attempt = 0
+        orig_idx = idx
+        # If this dataset is a Subset, map idx to original index
+        if hasattr(self, 'indices'):
+            orig_idx = self.indices[idx]
+        while attempt < max_attempts:
+            image_path = self.image_paths[idx]
+            label = self.labels[idx]
+            try:
+                image = Image.open(image_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, label, orig_idx
+            except Exception as e:
+                print(f"Warning: Error loading or transforming image {image_path}: {e}. Retrying with a different sample.")
+                idx = np.random.randint(0, len(self.image_paths))
+                if hasattr(self, 'indices'):
+                    orig_idx = self.indices[idx]
+                else:
+                    orig_idx = idx
+                attempt += 1
+        # If all attempts fail, return exception object (do not raise)
+        print("Error: Failed to load a valid image after multiple attempts. Returning CorruptSampleException object.")
+        return CorruptSampleException(f"Failed to load image after {max_attempts} attempts.")
     
     def get_class_distribution(self) -> Dict[str, int]:
         """Get the distribution of classes in the dataset."""
@@ -216,3 +222,30 @@ def create_tta_transforms(image_size: int = 224, n: int = 5) -> list:
             ])
         )
     return tta_transforms
+
+
+class CorruptSampleException(Exception):
+    """Raised when a sample cannot be loaded after several attempts."""
+    pass
+
+
+def safe_collate_fn(batch):
+    """
+    Collate function that skips samples where CorruptSampleException was raised.
+    Usage: DataLoader(..., collate_fn=safe_collate_fn)
+    Now supports (image, label, idx) tuples for per-sample weighting.
+    """
+    filtered = []
+    for b in batch:
+        if isinstance(b, Exception):
+            continue
+        filtered.append(b)
+    if len(filtered) == 0:
+        return torch.empty(0), torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+    # Support both (image, label) and (image, label, idx)
+    if len(filtered[0]) == 3:
+        images, labels, indices = zip(*filtered)
+        return torch.stack(images, 0), torch.tensor(labels, dtype=torch.long), torch.tensor(indices, dtype=torch.long)
+    else:
+        images, labels = zip(*filtered)
+        return torch.stack(images, 0), torch.tensor(labels, dtype=torch.long), None

@@ -3,18 +3,14 @@
 Test ambiguity detection on the trained model.
 """
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent / "src"))
-
-import torch
-import torch.nn.functional as F
-from models.efficientnet_classifier import EfficientNetClassifier
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms
-from ambiguity.detector import AmbiguityDetector
+from src.models.efficientnet_classifier import EfficientNetClassifier
+from src.data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, safe_collate_fn
+from src.ambiguity.detector import AmbiguityDetector
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
 
 def test_ambiguity_detection():
     """Test ambiguity detection on some sample images."""
@@ -51,7 +47,7 @@ def test_ambiguity_detection():
         num_classes=len(art_periods)
     )
     checkpoint = torch.load(model_path, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['state_dict'])
     
     # Initialize ambiguity detector
     detector = AmbiguityDetector(
@@ -71,7 +67,7 @@ def test_ambiguity_detection():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     
-    test_loader = DataLoader(test_dataset, batch_size=20, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=20, shuffle=False, collate_fn=safe_collate_fn)
     
     # Process all test images in batch
     all_logits = []
@@ -82,7 +78,7 @@ def test_ambiguity_detection():
     val_indices = [i for i, path in enumerate(dataset.image_paths) if path in val_paths]
     val_dataset = Subset(dataset, val_indices)
     val_dataset.dataset.transform = test_transform
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, collate_fn=safe_collate_fn)
     
     val_logits = []
     with torch.no_grad():

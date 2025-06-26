@@ -44,6 +44,9 @@ class ModelConfig:
     # Fine-tuning phases
     phase1_epochs: int = 20  # More epochs for head
     phase2_epochs: int = 80 # More epochs for full model
+    stage1_epochs: Optional[int] = None
+    stage2_epochs: Optional[int] = None
+    stage3_epochs: Optional[int] = None
     phase1_lr: float = 1e-3
     phase2_lr: float = 5e-5  # Lower learning rate for fine-tuning
     weight_decay: float = 0.05  # Increased weight decay
@@ -102,6 +105,13 @@ class ProjectConfig:
     def __post_init__(self):
         """Post-initialization to set dependent values."""
         self.model.num_classes = len(self.data.art_periods)
+        # Set stage epochs if not provided, so they sum to phase2_epochs
+        if self.model.stage1_epochs is None or self.model.stage2_epochs is None or self.model.stage3_epochs is None:
+            # Default: 25%, 25%, 50% of phase2_epochs
+            total = self.model.phase2_epochs
+            self.model.stage1_epochs = int(0.25 * total)
+            self.model.stage2_epochs = int(0.25 * total)
+            self.model.stage3_epochs = total - self.model.stage1_epochs - self.model.stage2_epochs
         
         # Create output directories
         os.makedirs(self.training.output_dir, exist_ok=True)

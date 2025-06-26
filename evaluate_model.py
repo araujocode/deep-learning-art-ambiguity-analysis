@@ -3,19 +3,15 @@
 Evaluate the trained model on test data.
 """
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent / "src"))
-
-import torch
-import torch.nn.functional as F
-from models.efficientnet_classifier import EfficientNetClassifier
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms
+from src.models.efficientnet_classifier import EfficientNetClassifier
+from src.data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, safe_collate_fn
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
+import torch
+import torch.nn.functional as F
 
 def evaluate_model():
     """Evaluate the trained model on test data."""
@@ -47,7 +43,7 @@ def evaluate_model():
     test_dataset = Subset(dataset, test_indices)
     test_dataset.dataset.transform = test_transform
     
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=safe_collate_fn)
     
     print(f"Test samples: {len(test_dataset)}")
     
@@ -58,7 +54,7 @@ def evaluate_model():
         num_classes=len(art_periods)
     )
     checkpoint = torch.load(model_path, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['state_dict'])
     model.eval()
     
     print(f"Model loaded from epoch {checkpoint['epoch']}")

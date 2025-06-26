@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import matplotlib
 from typing import Dict, List, Tuple, Optional, Callable
 import torch
 import torch.nn as nn
@@ -12,11 +13,11 @@ from torchmetrics.classification import MulticlassAccuracy, MulticlassCalibratio
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from itertools import chain
-
-from models.efficientnet_classifier import EfficientNetClassifier, ModelManager
-from .regularization import MixUp, mixup_criterion, CutMix, cutmix_criterion
+from src.models.efficientnet_classifier import EfficientNetClassifier
+from src.training.regularization import MixUp, mixup_criterion, CutMix, cutmix_criterion
 import torch.nn.functional as F
 from torchvision.transforms import RandAugment, AutoAugment, AutoAugmentPolicy
+from src.models.efficientnet_classifier import ModelManager
 
 
 class Trainer:
@@ -63,8 +64,6 @@ class Trainer:
         os.makedirs(os.path.join(self.output_dir, "checkpoints"), exist_ok=True) # Ensure checkpoints directory exists
         self.logger = logger or self._setup_logger()
         
-        self.model_manager = ModelManager(model)
-        
         # Metrics
         self.accuracy_metric = MulticlassAccuracy(num_classes=model.num_classes).to(device)
         self.calibration_metric = MulticlassCalibrationError(
@@ -85,6 +84,7 @@ class Trainer:
         
         self.best_val_acc = 0.0
         self.best_epoch = 0
+        self.global_epoch = 0  # Running global epoch counter
         
         # Augmentations
         self.use_mixup = use_mixup
@@ -99,39 +99,52 @@ class Trainer:
         # Class-balanced weights (optional, can be set externally)
         self.class_weights = None
 
+        # ModelManager for checkpointing
+        self.model_manager = ModelManager(self.model)
+
     def set_class_weights(self, class_weights: torch.Tensor):
         """Set class-balanced weights for loss function."""
         self.class_weights = class_weights
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logger for training."""
-        logger = logging.getLogger('Trainer')
+        logger = logging.getLogger('my_project.trainer')
         logger.setLevel(logging.INFO)
-        
-        # File handler
-        log_file = os.path.join(self.output_dir, 'training.log')
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        
-        # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-        
+        # Check for both file and console handlers
+        has_file_handler = any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+        has_console_handler = any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
+        if not has_file_handler:
+            log_file = os.path.join(self.output_dir, 'training.log')
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        if not has_console_handler:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
         return logger
     
     def _get_loss(self, label_smoothing: float = 0.1):
-        """Get loss function with optional Focal Loss and class weights."""
-        weight = self.ambiguity_weights if self.ambiguity_weights is not None else self.class_weights
+        """Get loss function with optional Focal Loss, class weights, or ambiguity weights."""
+        # If ambiguity_weights is set and is 1D (per-sample), use AmbiguityWeightedLoss
+        if self.ambiguity_weights is not None:
+            if self.ambiguity_weights.dim() == 1 and (
+                self.ambiguity_weights.shape[0] != (self.class_weights.shape[0] if self.class_weights is not None else -1)
+            ):
+                # Use AmbiguityWeightedLoss wrapper, base_loss must be reduction='none'
+                base_loss = FocalLoss(gamma=2.0, reduction='none') if self.use_focal_loss else nn.CrossEntropyLoss(label_smoothing=label_smoothing, reduction='none')
+                return AmbiguityWeightedLoss(base_loss, self.ambiguity_weights)
+            # If ambiguity_weights is per-class (same shape as class_weights), treat as class weights
+            elif self.class_weights is not None and self.ambiguity_weights.shape[0] == self.class_weights.shape[0]:
+                weight = self.ambiguity_weights
+            else:
+                raise ValueError("Ambiguity weights shape does not match class count or sample count.")
+        else:
+            weight = self.class_weights
         if self.use_focal_loss:
             return FocalLoss(gamma=2.0, weight=weight)
         else:
@@ -211,139 +224,68 @@ class Trainer:
         label_smoothing: float = 0.1,
         early_stopping_patience: int = 12,
         lr_scheduler: str = "onecycle",
-        progressive_unfreeze: bool = True,
-        stage1_epochs: int = 10,
-        stage2_epochs: int = 10,
+        unfreeze_last_n_blocks: int = 2
     ) -> Dict[str, List[float]]:
         """
-        Phase 2: Progressive unfreezing with discriminative learning rates.
+        Phase 2: One-shot unfreezing of last N blocks for fine-tuning.
         Args:
-            num_epochs: Total number of epochs for phase 2
-            learning_rate: Base learning rate for phase 2
+            num_epochs: Number of epochs for phase 2
+            learning_rate: Learning rate
             weight_decay: Weight decay
             label_smoothing: Label smoothing factor
             early_stopping_patience: Early stopping patience (epochs)
-            lr_scheduler: Learning rate scheduler type ('onecycle', 'plateau', or 'cosine')
-            progressive_unfreeze: Whether to use staged unfreezing (recommended)
-            stage1_epochs: Epochs for stage 1 (last 2 blocks)
-            stage2_epochs: Epochs for stage 2 (last 4 blocks)
+            lr_scheduler: Learning rate scheduler type
+            unfreeze_last_n_blocks: Number of last blocks to unfreeze
         Returns:
             Training history for phase 2
         """
-        self.logger.info("Starting Phase 2: Progressive unfreezing with discriminative learning rates")
-        total_epochs = num_epochs
-        phase2_history = {
-            'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': [], 'val_ece': [], 'learning_rates': []
-        }
-        # Helper to get blocks and head
+        self.logger.info(f"Starting Phase 2: Unfreezing last {unfreeze_last_n_blocks} blocks for fine-tuning")
         backbone = self.model.backbone
         head = self.model.classifier
         blocks = backbone.blocks
-        # Stage 1: Unfreeze last 2 blocks
-        self.logger.info(f"Phase 2a: Unfreezing last 2 blocks for {stage1_epochs} epochs")
-        self.model.freeze_blocks(2)
+        # Freeze all but last N blocks
+        self.model.freeze_blocks(unfreeze_last_n_blocks)
         for p in head.parameters():
             p.requires_grad = True
-        params = list(head.parameters()) + list(self._flatten_block_params(blocks[-2:]))
+        params = list(head.parameters()) + list(self._flatten_block_params(blocks[-unfreeze_last_n_blocks:]))
         optimizer = optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
         if lr_scheduler == "onecycle":
-            scheduler = OneCycleLR(optimizer, max_lr=learning_rate, steps_per_epoch=len(self.train_loader), epochs=stage1_epochs)
+            scheduler = OneCycleLR(optimizer, max_lr=learning_rate, steps_per_epoch=len(self.train_loader), epochs=num_epochs)
         elif lr_scheduler == "plateau":
             scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
         else:
-            scheduler = CosineAnnealingLR(optimizer, T_max=stage1_epochs, eta_min=1e-6)
+            scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
         criterion = self._get_loss(label_smoothing=label_smoothing)
-        hist1 = self._train_epochs(
+        history = self._train_epochs(
             optimizer=optimizer,
             scheduler=scheduler,
             criterion=criterion,
-            num_epochs=stage1_epochs,
-            phase_name="Phase2a",
+            num_epochs=num_epochs,
+            phase_name="Phase2",
             early_stopping_patience=early_stopping_patience
         )
-        for k in phase2_history: phase2_history[k].extend(hist1[k])
-        # Stage 2: Unfreeze last 4 blocks, discriminative LRs
-        self.logger.info(f"Phase 2b: Unfreezing last 4 blocks for {stage2_epochs} epochs")
-        self.model.freeze_blocks(4)
-        for p in head.parameters():
-            p.requires_grad = True
-        # Discriminative LRs: head=1e-4, blocks[-4:-2]=5e-5, blocks[-2:]=1e-5
-        param_groups = [
-            {'params': head.parameters(), 'lr': learning_rate},
-            {'params': self._flatten_block_params(blocks[-4:-2]), 'lr': 5e-5},
-            {'params': self._flatten_block_params(blocks[-2:]), 'lr': 1e-5},
-        ]
-        optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
-        if lr_scheduler == "onecycle":
-            scheduler = OneCycleLR(optimizer, max_lr=learning_rate, steps_per_epoch=len(self.train_loader), epochs=stage2_epochs)
-        elif lr_scheduler == "plateau":
-            scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-        else:
-            scheduler = CosineAnnealingLR(optimizer, T_max=stage2_epochs, eta_min=1e-6)
-        criterion = self._get_loss(label_smoothing=label_smoothing)
-        hist2 = self._train_epochs(
-            optimizer=optimizer,
-            scheduler=scheduler,
-            criterion=criterion,
-            num_epochs=stage2_epochs,
-            phase_name="Phase2b",
-            early_stopping_patience=early_stopping_patience
-        )
-        for k in phase2_history: phase2_history[k].extend(hist2[k])
-        # Stage 3: Unfreeze all blocks, discriminative LRs
-        stage3_epochs = total_epochs - stage1_epochs - stage2_epochs
-        if stage3_epochs > 0:
-            self.logger.info(f"Phase 2c: Unfreezing all blocks for {stage3_epochs} epochs")
-            self.model.unfreeze_backbone()
-            for p in head.parameters():
-                p.requires_grad = True
-            # Example: head=5e-5, mid=2e-5, early=1e-5
-            n_blocks = len(blocks)
-            head_lr = 5e-5
-            mid_lr = 2e-5
-            early_lr = 1e-5
-            param_groups = [
-                {'params': head.parameters(), 'lr': head_lr},
-                {'params': self._flatten_block_params(blocks[-4:]), 'lr': mid_lr},
-                {'params': self._flatten_block_params(blocks[:-4]), 'lr': early_lr},
-            ]
-            optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
-            if lr_scheduler == "onecycle":
-                scheduler = OneCycleLR(optimizer, max_lr=head_lr, steps_per_epoch=len(self.train_loader), epochs=stage3_epochs)
-            elif lr_scheduler == "plateau":
-                scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-            else:
-                scheduler = CosineAnnealingLR(optimizer, T_max=stage3_epochs, eta_min=1e-6)
-            criterion = self._get_loss(label_smoothing=label_smoothing)
-            hist3 = self._train_epochs(
-                optimizer=optimizer,
-                scheduler=scheduler,
-                criterion=criterion,
-                num_epochs=stage3_epochs,
-                phase_name="Phase2c",
-                early_stopping_patience=early_stopping_patience
-            )
-            for k in phase2_history: phase2_history[k].extend(hist3[k])
         self.logger.info(f"Phase 2 completed. Best val accuracy: {self.best_val_acc:.4f}")
-        return phase2_history
-    
-    def train_phase2_progressive(
+        return history
+
+    def train_phase2_staged(
         self,
         total_epochs: int = 30,
         stage1_epochs: int = 10,
         stage2_epochs: int = 10,
         stage3_epochs: int = 10,
+        learning_rate: float = 1e-4,
         weight_decay: float = 1e-2,
         label_smoothing: float = 0.1,
         early_stopping_patience: int = 12,
         lr_scheduler: str = "onecycle"
     ) -> Dict[str, List[float]]:
         """
-        Phase 2: Progressive unfreezing with discriminative learning rates.
+        Phase 2: Progressive unfreezing with discriminative learning rates (staged).
+        LRs are now scaled from the provided learning_rate argument.
         Stages:
-            1. Unfreeze last 2 blocks (stage1_epochs, LR=1e-4)
-            2. Unfreeze last 4 blocks (stage2_epochs, LRs: head=1e-4, blocks -4:-2=5e-5, blocks -2:=1e-5)
-            3. Unfreeze all (stage3_epochs, LRs: head=5e-5, mid=2e-5, early=1e-5)
+            1. Unfreeze last 2 blocks (stage1_epochs, LR=learning_rate)
+            2. Unfreeze last 4 blocks (stage2_epochs, LRs: head=learning_rate, blocks -4:-2=0.5*learning_rate, blocks -2:=0.1*learning_rate)
+            3. Unfreeze all (stage3_epochs, LRs: head=0.5*learning_rate, mid=0.2*learning_rate, early=0.1*learning_rate)
         """
         self.logger.info("Starting Phase 2: Progressive unfreezing with discriminative LRs")
         model = self.model
@@ -356,9 +298,9 @@ class Trainer:
         model.freeze_blocks(2)
         for p in head.parameters():
             p.requires_grad = True
-        optimizer = optim.AdamW(model.get_trainable_parameters(), lr=1e-4, weight_decay=weight_decay)
+        optimizer = optim.AdamW(model.get_trainable_parameters(), lr=learning_rate, weight_decay=weight_decay)
         if lr_scheduler == "onecycle":
-            scheduler = OneCycleLR(optimizer, max_lr=1e-4, steps_per_epoch=len(self.train_loader), epochs=stage1_epochs)
+            scheduler = OneCycleLR(optimizer, max_lr=learning_rate, steps_per_epoch=len(self.train_loader), epochs=stage1_epochs)
         elif lr_scheduler == "plateau":
             scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
         else:
@@ -367,18 +309,18 @@ class Trainer:
         hist1 = self._train_epochs(optimizer, scheduler, criterion, stage1_epochs, "Phase2a", early_stopping_patience)
         for k in all_history: all_history[k].extend(hist1[k])
         # Stage 2: Unfreeze last 4 blocks, discriminative LRs
-        model.freeze_blocks(4)
+        self.logger.info(f"Phase 2b: Unfreezing last 4 blocks for {stage2_epochs} epochs")
+        self.model.freeze_blocks(4)
         for p in head.parameters():
             p.requires_grad = True
-        # Parameter groups: head, blocks -4:-2, blocks -2:
         param_groups = [
-            {'params': head.parameters(), 'lr': 1e-4},
-            {'params': self._flatten_block_params(backbone.blocks[-4:-2]), 'lr': 5e-5},
-            {'params': self._flatten_block_params(backbone.blocks[-2:]), 'lr': 1e-5},
+            {'params': head.parameters(), 'lr': learning_rate},
+            {'params': self._flatten_block_params(backbone.blocks[-4:-2]), 'lr': 0.5 * learning_rate},
+            {'params': self._flatten_block_params(backbone.blocks[-2:]), 'lr': 0.1 * learning_rate},
         ]
         optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
         if lr_scheduler == "onecycle":
-            scheduler = OneCycleLR(optimizer, max_lr=1e-4, steps_per_epoch=len(self.train_loader), epochs=stage2_epochs)
+            scheduler = OneCycleLR(optimizer, max_lr=learning_rate, steps_per_epoch=len(self.train_loader), epochs=stage2_epochs)
         elif lr_scheduler == "plateau":
             scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
         else:
@@ -386,31 +328,33 @@ class Trainer:
         criterion = self._get_loss(label_smoothing=label_smoothing)
         hist2 = self._train_epochs(optimizer, scheduler, criterion, stage2_epochs, "Phase2b", early_stopping_patience)
         for k in all_history: all_history[k].extend(hist2[k])
-        # Stage 3: Unfreeze all, discriminative LRs
-        model.unfreeze_backbone()
-        for p in head.parameters():
-            p.requires_grad = True
-        n_blocks = len(backbone.blocks)
-        early = backbone.blocks[:n_blocks//3]
-        mid = backbone.blocks[n_blocks//3:2*n_blocks//3]
-        late = backbone.blocks[2*n_blocks//3:]
-        param_groups = [
-            {'params': head.parameters(), 'lr': 5e-5},
-            {'params': self._flatten_block_params(mid), 'lr': 2e-5},
-            {'params': self._flatten_block_params(early), 'lr': 1e-5},
-            {'params': self._flatten_block_params(late), 'lr': 1e-5},
-        ]
-        optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
-        if lr_scheduler == "onecycle":
-            scheduler = OneCycleLR(optimizer, max_lr=5e-5, steps_per_epoch=len(self.train_loader), epochs=stage3_epochs)
-        elif lr_scheduler == "plateau":
-            scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-        else:
-            scheduler = CosineAnnealingLR(optimizer, T_max=stage3_epochs, eta_min=1e-6)
-        criterion = self._get_loss(label_smoothing=label_smoothing)
-        hist3 = self._train_epochs(optimizer, scheduler, criterion, stage3_epochs, "Phase2c", early_stopping_patience)
-        for k in all_history: all_history[k].extend(hist3[k])
-        self.logger.info(f"Progressive Phase 2 completed. Best val accuracy: {self.best_val_acc:.4f}")
+        # Stage 3: Unfreeze all blocks, discriminative LRs
+        stage3_epochs = total_epochs - stage1_epochs - stage2_epochs
+        if stage3_epochs > 0:
+            self.logger.info(f"Phase 2c: Unfreezing all blocks for {stage3_epochs} epochs")
+            self.model.unfreeze_backbone()
+            for p in head.parameters():
+                p.requires_grad = True
+            n_blocks = len(backbone.blocks)
+            head_lr = 0.5 * learning_rate
+            mid_lr = 0.2 * learning_rate
+            early_lr = 0.1 * learning_rate
+            param_groups = [
+                {'params': head.parameters(), 'lr': head_lr},
+                {'params': self._flatten_block_params(backbone.blocks[-4:]), 'lr': mid_lr},
+                {'params': self._flatten_block_params(backbone.blocks[:-4]), 'lr': early_lr},
+            ]
+            optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+            if lr_scheduler == "onecycle":
+                scheduler = OneCycleLR(optimizer, max_lr=head_lr, steps_per_epoch=len(self.train_loader), epochs=stage3_epochs)
+            elif lr_scheduler == "plateau":
+                scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+            else:
+                scheduler = CosineAnnealingLR(optimizer, T_max=stage3_epochs, eta_min=1e-6)
+            criterion = self._get_loss(label_smoothing=label_smoothing)
+            hist3 = self._train_epochs(optimizer, scheduler, criterion, stage3_epochs, "Phase2c", early_stopping_patience)
+            for k in all_history: all_history[k].extend(hist3[k])
+        self.logger.info(f"Phase 2 completed. Best val accuracy: {self.best_val_acc:.4f}")
         return all_history
 
     def _train_epochs(
@@ -445,12 +389,14 @@ class Trainer:
             'learning_rates': []
         }
         
-        best_val_acc = 0.0  # Initialize best_val_acc here
+        phase_best_val_acc = 0.0  # Track best val acc for this phase
+        phase_best_epoch = 0
         epochs_since_improvement = 0
         
         for epoch in range(num_epochs):
+            self.global_epoch += 1  # Increment global epoch counter
             epoch_start_time = time.time()
-            self.logger.info(f"Starting {phase_name} Epoch {epoch + 1}/{num_epochs}, LR: {optimizer.param_groups[0]['lr']:.6f}")
+            self.logger.info(f"Starting {phase_name} Epoch {epoch + 1}/{num_epochs}, Global Epoch: {self.global_epoch}, LR: {optimizer.param_groups[0]['lr']:.6f}")
             # Training
             train_loss, train_acc = self._train_epoch(
                 optimizer, criterion, phase_name, epoch + 1, num_epochs, scheduler if isinstance(scheduler, OneCycleLR) else None
@@ -480,41 +426,69 @@ class Trainer:
             self.history['val_ece'].append(val_ece)
             self.history['learning_rates'].append(current_lr)
 
-            # Save best model
-            if val_acc > self.best_val_acc:
-                self.best_val_acc = val_acc
-                self.best_epoch = epoch + len(self.history['val_acc']) - len(phase_history['val_acc']) # Adjust epoch number for overall history
-                self.logger.info(f"New best validation accuracy: {val_acc:.4f}. Saving model...")
+            # Save phase-best model
+            improved = False
+            if val_acc > phase_best_val_acc:
+                phase_best_val_acc = val_acc
+                phase_best_epoch = self.global_epoch
+                self.logger.info(f"New best validation accuracy for {phase_name}: {val_acc:.4f}. Saving phase-best model...")
+                # Save the best model checkpoint
                 self.model_manager.save_checkpoint(
-                    filepath=os.path.join(self.output_dir, 'checkpoints', 'best_model.pth'),
-                    epoch=self.best_epoch,
-                    metrics={'val_loss': val_loss, 'val_acc': val_acc}
+                    filepath=os.path.join(self.output_dir, 'checkpoints', f'best_model_{phase_name.lower()}.pth'),
+                    epoch=phase_best_epoch,
+                    optimizer_state=optimizer.state_dict(),
+                    scheduler_state=scheduler.state_dict(),
+                    metrics={
+                        'val_loss': val_loss,
+                        'val_acc': val_acc,
+                        'best_val_acc': phase_best_val_acc,
+                        'best_epoch': phase_best_epoch
+                    }
                 )
                 epochs_since_improvement = 0
+                improved = True
+                # If this is also a new global best, update global best
+                if val_acc > self.best_val_acc:
+                    self.best_val_acc = val_acc
+                    self.best_epoch = self.global_epoch
+                    self.logger.info(f"New global best validation accuracy: {val_acc:.4f}. Saving global best model...")
+                    # Save the global best model checkpoint
+                    self.model_manager.save_checkpoint(
+                        filepath=os.path.join(self.output_dir, 'checkpoints', 'best_model.pth'),
+                        epoch=self.best_epoch,
+                        optimizer_state=optimizer.state_dict(),
+                        scheduler_state=scheduler.state_dict(),
+                        metrics={
+                            'val_loss': val_loss,
+                            'val_acc': val_acc,
+                            'best_val_acc': self.best_val_acc,
+                            'best_epoch': self.best_epoch
+                        }
+                    )
             else:
-                self.logger.info(f"Validation accuracy did not improve from {self.best_val_acc:.4f}.")
+                self.logger.info(f"Validation accuracy did not improve from {phase_best_val_acc:.4f} for {phase_name}.")
                 epochs_since_improvement += 1
             
-            # Save checkpoint
-            current_overall_epoch = epoch + len(self.history['val_acc']) - len(phase_history['val_acc'])
-            self.model_manager.save_checkpoint(
-                filepath=os.path.join(self.output_dir, 'checkpoints', 'latest_checkpoint.pth'),
-                epoch=current_overall_epoch,
-                optimizer_state=optimizer.state_dict(),
-                scheduler_state=scheduler.state_dict(),
-                metrics={
-                    'train_loss': train_loss, 
-                    'train_acc': train_acc, 
-                    'val_loss': val_loss, 
-                    'val_acc': val_acc, 
-                    'val_ece': val_ece, 
-                    'lr': current_lr
-                }
-            )
+            # Only save 'latest' checkpoint if not improved (avoid redundant disk I/O)
+            if not improved:
+                self.model_manager.save_checkpoint(
+                    filepath=os.path.join(self.output_dir, 'checkpoints', 'latest_checkpoint.pth'),
+                    epoch=self.global_epoch,
+                    optimizer_state=optimizer.state_dict(),
+                    scheduler_state=scheduler.state_dict(),
+                    metrics={
+                        'train_loss': train_loss, 
+                        'train_acc': train_acc, 
+                        'val_loss': val_loss, 
+                        'val_acc': val_acc, 
+                        'val_ece': val_ece, 
+                        'lr': current_lr
+                    }
+                )
             
             epoch_duration = time.time() - epoch_start_time
             self.logger.info(
-                f"{phase_name} Epoch {epoch + 1}/{num_epochs} Summary: "
+                f"{phase_name} Epoch {epoch + 1}/{num_epochs} (Global Epoch {self.global_epoch}) Summary: "
                 f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
                 f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val ECE: {val_ece:.4f}, "
                 f"LR: {current_lr:.6f}, Duration: {epoch_duration:.2f}s"
@@ -524,7 +498,7 @@ class Trainer:
             if early_stopping_patience is not None and epochs_since_improvement >= early_stopping_patience:
                 self.logger.info(f"Early stopping triggered after {epoch+1} epochs with no improvement in validation accuracy for {early_stopping_patience} epochs.")
                 break
-            
+        
         return phase_history
 
     def _train_epoch(
@@ -543,7 +517,16 @@ class Trainer:
         progress_bar = tqdm(self.train_loader, desc=f"{phase_name} Epoch {current_epoch}/{total_epochs} [Training]", unit="batch")
         mixup = MixUp(self.mixup_alpha) if self.use_mixup else None
         cutmix = CutMix(self.cutmix_alpha) if self.use_cutmix else None
-        for inputs, labels in progress_bar:
+        for batch_idx, batch in enumerate(progress_bar):
+            # Support (inputs, labels, indices) or (inputs, labels, None)
+            if len(batch) == 3:
+                inputs, labels, indices = batch
+            else:
+                inputs, labels = batch
+                indices = None
+            # Skip empty batches
+            if inputs.numel() == 0:
+                continue
             inputs, labels = inputs.to(self.device), labels.to(self.device)
             optimizer.zero_grad()
             if self.use_cutmix:
@@ -556,7 +539,11 @@ class Trainer:
                 loss = mixup_criterion(criterion, outputs, y_a, y_b, lam)
             else:
                 outputs = self.model(inputs)
-                loss = criterion(outputs, labels)
+                # If using AmbiguityWeightedLoss, pass indices
+                if isinstance(criterion, AmbiguityWeightedLoss):
+                    loss = criterion(outputs, labels, indices=indices)
+                else:
+                    loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             # Step OneCycleLR per batch
@@ -581,24 +568,27 @@ class Trainer:
         total_loss = 0.0
         self.accuracy_metric.reset()
         self.calibration_metric.reset()
-        
-        # Add tqdm progress bar
         progress_bar = tqdm(self.val_loader, desc=f"{phase_name} Epoch {current_epoch}/{total_epochs} [Validation]", unit="batch")
-
         with torch.no_grad():
-            for inputs, labels in progress_bar:
+            for batch_idx, batch in enumerate(progress_bar):
+                if len(batch) == 3:
+                    inputs, labels, indices = batch
+                else:
+                    inputs, labels = batch
+                    indices = None
+                # Skip empty batches
+                if inputs.numel() == 0:
+                    continue
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-                
                 outputs = self.model(inputs)
-                loss = criterion(outputs, labels)
-                
+                if isinstance(criterion, AmbiguityWeightedLoss):
+                    loss = criterion(outputs, labels, indices=indices)
+                else:
+                    loss = criterion(outputs, labels)
                 total_loss += loss.item() * inputs.size(0)
                 self.accuracy_metric.update(outputs, labels)
                 self.calibration_metric.update(outputs, labels)
-
-                # Update progress bar description
                 progress_bar.set_postfix(loss=loss.item(), acc=self.accuracy_metric.compute().item(), ece=self.calibration_metric.compute().item())
-
         avg_loss = total_loss / len(self.val_loader.dataset)
         avg_acc = self.accuracy_metric.compute().item()
         avg_ece = self.calibration_metric.compute().item()
@@ -617,16 +607,14 @@ class Trainer:
             'best_val_acc': self.best_val_acc,
             'best_epoch': self.best_epoch,
             'history': self.history
-        };
-        
+        }
         self.model_manager.save_checkpoint(
             filepath=checkpoint_path,
             epoch=epoch,
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
             metrics=metrics
-        );
-        
+        )
         self.logger.info(f"Best model saved at epoch {epoch+1} with val accuracy: {self.best_val_acc:.4f}")
     
     def plot_training_history(self, save_path: Optional[str] = None):
@@ -669,11 +657,12 @@ class Trainer:
         axes[1, 1].grid(True)
         
         plt.tight_layout(pad=3.0)
-        
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        # Only show if not running in headless mode
         
-        plt.show()
+        if not save_path and matplotlib.get_backend() != 'Agg':
+            plt.show()
     
     def get_training_summary(self) -> Dict:
         """Get training summary statistics."""
@@ -689,7 +678,6 @@ class Trainer:
 
     def _flatten_block_params(self, blocks):
         """Utility to flatten parameters from a list of blocks."""
-        from itertools import chain
         return chain.from_iterable(blk.parameters() for blk in blocks)
 
 # Focal Loss implementation
@@ -727,8 +715,6 @@ class AmbiguityWeightedLoss(nn.Module):
         else:
             weights = torch.ones(input.size(0), device=input.device)
         loss = self.base_loss(input, target)
-        if loss.dim() > 0:
-            loss = loss * weights
-            return loss.mean()
-        else:
-            return loss
+        # loss is (N,) if reduction='none'
+        loss = loss * weights
+        return loss.mean()

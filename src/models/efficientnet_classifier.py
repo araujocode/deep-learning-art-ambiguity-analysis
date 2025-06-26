@@ -181,34 +181,17 @@ class ModelManager:
         metrics: Optional[Dict] = None
     ):
         """
-        Save model checkpoint.
-        
-        Args:
-            filepath: Path to save the checkpoint
-            epoch: Current epoch number
-            optimizer_state: Optimizer state dict
-            scheduler_state: Scheduler state dict
-            metrics: Training metrics
+        Save model checkpoint using unified keys only.
         """
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'model_config': {
-                'backbone': self.model.backbone_name,
-                'num_classes': self.model.num_classes,
-                'feature_dim': self.model.feature_dim
-            }
+            'state_dict': self.model.state_dict(),
+            'optimizer_state_dict': optimizer_state,
+            'scheduler_state_dict': scheduler_state,
+            'metrics': metrics if metrics is not None else {},
         }
-        
-        if optimizer_state:
-            checkpoint['optimizer_state_dict'] = optimizer_state
-        if scheduler_state:
-            checkpoint['scheduler_state_dict'] = scheduler_state
-        if metrics:
-            checkpoint['metrics'] = metrics
-        
         torch.save(checkpoint, filepath)
-    
+
     def load_checkpoint(
         self,
         filepath: str,
@@ -216,43 +199,30 @@ class ModelManager:
         load_scheduler: bool = False
     ) -> Dict[str, Any]:
         """
-        Load model checkpoint.
-        
-        Args:
-            filepath: Path to the checkpoint file
-            load_optimizer: Whether to return optimizer state
-            load_scheduler: Whether to return scheduler state
-            
-        Returns:
-            Dictionary containing loaded states
+        Load model checkpoint, expecting unified keys only.
         """
         checkpoint = torch.load(filepath, map_location='cpu')
-        
         # Load model state
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        
+        if 'state_dict' in checkpoint:
+            self.model.load_state_dict(checkpoint['state_dict'])
+        else:
+            raise RuntimeError("Checkpoint missing model weights (expected 'state_dict')")
         result = {
             'epoch': checkpoint.get('epoch', 0),
             'metrics': checkpoint.get('metrics', {})
         }
-        
-        if load_optimizer and 'optimizer_state_dict' in checkpoint:
-            result['optimizer_state_dict'] = checkpoint['optimizer_state_dict']
-        
-        if load_scheduler and 'scheduler_state_dict' in checkpoint:
-            result['scheduler_state_dict'] = checkpoint['scheduler_state_dict']
-        
+        if load_optimizer:
+            result['optimizer_state_dict'] = checkpoint.get('optimizer_state_dict', None)
+        if load_scheduler:
+            result['scheduler_state_dict'] = checkpoint.get('scheduler_state_dict', None)
         return result
-    
+
     def export_for_inference(self, filepath: str):
         """
-        Export model for inference (state dict only).
-        
-        Args:
-            filepath: Path to save the model
+        Export model for inference (state dict only), using 'state_dict' as the key.
         """
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'state_dict': self.model.state_dict(),
             'model_config': {
                 'backbone': self.model.backbone_name,
                 'num_classes': self.model.num_classes,

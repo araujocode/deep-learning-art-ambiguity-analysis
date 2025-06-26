@@ -3,22 +3,20 @@
 Comprehensive ambiguity analysis of the trained model.
 """
 
-import sys
 from pathlib import Path
-# sys.path.append(str(Path(__file__).parent / "src")) # No longer needed if called from train.py
 
-import torch
-# import torch.nn.functional as F # Not directly used here
-from models.efficientnet_classifier import EfficientNetClassifier # Needed if model is passed but not type hinted strongly
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms # For type hints if loaders are not directly passed
-from ambiguity.detector import AmbiguityDetector
-from torch.utils.data import DataLoader # For type hints
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-# from sklearn.metrics import classification_report, confusion_matrix # Not used in this refactored version directly
 import pandas as pd
-from config.config import ProjectConfig # For type hinting config
+import seaborn as sns
+import torch
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+
+# Remove sys.path.append hacks; use absolute imports
+from src.models.efficientnet_classifier import EfficientNetClassifier
+from src.data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, safe_collate_fn
+from src.config.config import ProjectConfig
+from src.ambiguity.detector import AmbiguityDetector
 
 
 def run_ambiguity_analysis(
@@ -27,32 +25,40 @@ def run_ambiguity_analysis(
     val_loader: DataLoader,   # Pass the validation loader
     test_loader: DataLoader,  # Pass the test loader
     device: torch.device,
-    ambiguity_output_dir: Path
+    ambiguity_output_dir: Path,
+    logger=None
 ):
-    """Comprehensive analysis of model ambiguity detection."""
+    """Comprehensive analysis of model ambiguity detection. Uses logger if provided."""
     
     art_periods = config.data.art_periods
     ambiguity_output_dir.mkdir(exist_ok=True, parents=True)
     
-    print("\\n🔍 Comprehensive Ambiguity Analysis")
-    print("=" * 50)
+    def logprint(msg):
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+    
+    logprint("\n🔍 Comprehensive Ambiguity Analysis")
+    logprint("=" * 50)
     
     model.eval() # Ensure model is in eval mode
     
-    print(f"  Device for ambiguity analysis: {device}")
+    logprint(f"  Device for ambiguity analysis: {device}")
     
     # Initialize ambiguity detector using config values if available, else defaults
     detector = AmbiguityDetector(
         softmax_pmax_threshold=getattr(config.ambiguity, 'softmax_pmax_threshold', 0.6),
         softmax_gap_threshold=getattr(config.ambiguity, 'softmax_gap_threshold', 0.1),
-        entropy_percentile_threshold=getattr(config.ambiguity, 'entropy_percentile_threshold', 80.0)
+        entropy_percentile_threshold=getattr(config.ambiguity, 'entropy_percentile_threshold', 80.0),
+        logger=logger
     )
     
     # Get validation data for threshold computation
     val_logits_list = []
     # val_labels_list = [] # Not strictly needed for val_probs for entropy threshold
     
-    print("\\n🔄 Processing validation set for ambiguity threshold calibration...")
+    logprint("\n🔄 Processing validation set for ambiguity threshold calibration...")
     with torch.no_grad():
         for images, _ in val_loader: # labels not needed here
             images = images.to(device)
@@ -68,7 +74,7 @@ def run_ambiguity_analysis(
     test_logits_list = []
     test_labels_list = []
     
-    print("🔄 Processing test set for ambiguity analysis...")
+    logprint("🔄 Processing test set for ambiguity analysis...")
     with torch.no_grad():
         for images, labels in test_loader:
             images = images.to(device)
@@ -80,36 +86,36 @@ def run_ambiguity_analysis(
     test_all_labels = torch.cat(test_labels_list, dim=0)
     
     # Comprehensive ambiguity analysis
-    print("\\n📈 Computing ambiguity statistics...")
+    logprint("\n📈 Computing ambiguity statistics...")
     # Pass val_probs for entropy threshold calibration
     stats = detector.analyze_ambiguity_statistics(test_all_logits, test_all_labels, val_probs)
     
     # Print statistics
-    print(f"\\n📊 AMBIGUITY DETECTION RESULTS (Test Set):")
-    print(f"{'='*50}")
-    print(f"Overall Test Accuracy (from ambiguity module): {stats['overall_accuracy']:.4f}")
-    print(f"Average Max Probability: {stats['average_max_prob']:.4f}")
-    print(f"Average Probability Gap: {stats['average_prob_gap']:.4f}")
-    print(f"Average Entropy: {stats['average_entropy']:.4f}")
-    print()
+    logprint(f"\n📊 AMBIGUITY DETECTION RESULTS (Test Set):")
+    logprint(f"{'='*50}")
+    logprint(f"Overall Test Accuracy (from ambiguity module): {stats['overall_accuracy']:.4f}")
+    logprint(f"Average Max Probability: {stats['average_max_prob']:.4f}")
+    logprint(f"Average Probability Gap: {stats['average_prob_gap']:.4f}")
+    logprint(f"Average Entropy: {stats['average_entropy']:.4f}")
+    logprint("")
     
-    print(f"📉 SOFTMAX-BASED DETECTION:")
-    print(f"  Ambiguous samples: {stats['softmax_ambiguous_count']}/{len(test_all_labels)} ({stats['softmax_ambiguous_percentage']:.2f}%)")
-    print(f"  Accuracy on ambiguous: {stats['softmax_ambiguous_accuracy']:.4f}")
-    print()
+    logprint(f"📉 SOFTMAX-BASED DETECTION:")
+    logprint(f"  Ambiguous samples: {stats['softmax_ambiguous_count']}/{len(test_all_labels)} ({stats['softmax_ambiguous_percentage']:.2f}%)")
+    logprint(f"  Accuracy on ambiguous: {stats['softmax_ambiguous_accuracy']:.4f}")
+    logprint("")
     
-    print(f"📈 ENTROPY-BASED DETECTION (Threshold: {detector.entropy_threshold_value:.4f if detector.entropy_threshold_value else 'N/A'}):")
-    print(f"  Ambiguous samples: {stats['entropy_ambiguous_count']}/{len(test_all_labels)} ({stats['entropy_ambiguous_percentage']:.2f}%)")
-    print(f"  Accuracy on ambiguous: {stats['entropy_ambiguous_accuracy']:.4f}")
-    print()
+    logprint(f"📈 ENTROPY-BASED DETECTION (Threshold: {detector.entropy_threshold_value:.4f if detector.entropy_threshold_value else 'N/A'}):")
+    logprint(f"  Ambiguous samples: {stats['entropy_ambiguous_count']}/{len(test_all_labels)} ({stats['entropy_ambiguous_percentage']:.2f}%)")
+    logprint(f"  Accuracy on ambiguous: {stats['entropy_ambiguous_accuracy']:.4f}")
+    logprint("")
     
-    print(f"🔄 COMBINED DETECTION (Union):")
-    print(f"  Ambiguous samples: {stats['combined_ambiguous_count']}/{len(test_all_labels)} ({stats['combined_ambiguous_percentage']:.2f}%)")
-    print(f"  Accuracy on ambiguous: {stats['combined_ambiguous_accuracy']:.4f}")
-    print()
+    logprint(f"🔄 COMBINED DETECTION (Union):")
+    logprint(f"  Ambiguous samples: {stats['combined_ambiguous_count']}/{len(test_all_labels)} ({stats['combined_ambiguous_percentage']:.2f}%)")
+    logprint(f"  Accuracy on ambiguous: {stats['combined_ambiguous_accuracy']:.4f}")
+    logprint("")
     
-    print(f"🔗 OVERLAP ANALYSIS:")
-    print(f"  Softmax ∩ Entropy: {stats['softmax_entropy_overlap']}/{len(test_all_labels)} ({stats['softmax_entropy_overlap_percentage']:.2f}%)")
+    logprint(f"🔗 OVERLAP ANALYSIS:")
+    logprint(f"  Softmax ∩ Entropy: {stats['softmax_entropy_overlap']}/{len(test_all_labels)} ({stats['softmax_entropy_overlap_percentage']:.2f}%)")
     
     # Get detailed ambiguity masks for visualization
     # Re-run with val_probs to ensure entropy threshold is set if not already
@@ -117,7 +123,7 @@ def run_ambiguity_analysis(
     _, entropy_metrics = detector.get_entropy_ambiguity(test_all_logits, val_probs) # Ensure threshold is computed
     
     # Create visualizations
-    print(f"\\n🎨 Creating ambiguity visualizations...")
+    logprint(f"\n🎨 Creating ambiguity visualizations...")
     
     fig, axes = plt.subplots(2, 2, figsize=(16, 14)) # Increased size slightly
     
@@ -187,11 +193,11 @@ def run_ambiguity_analysis(
     plt.tight_layout(pad=2.0)
     plot_save_path = ambiguity_output_dir / 'ambiguity_analysis_plots.png'
     plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-    print(f"Ambiguity analysis plots saved to: {plot_save_path}")
+    logprint(f"Ambiguity analysis plots saved to: {plot_save_path}")
     plt.close()
     
     # Per-class ambiguity analysis
-    print("\\n📋 Computing per-class ambiguity statistics...")
+    logprint("\\n📋 Computing per-class ambiguity statistics...")
     per_class_stats_dict = {} # Renamed from per_class_stats to avoid conflict
     for class_idx, class_name in enumerate(art_periods):
         class_mask = test_all_labels == class_idx
@@ -237,24 +243,24 @@ def run_ambiguity_analysis(
         lambda row: (row['combined_ambiguous'] / row['total_samples'] * 100) if row['total_samples'] > 0 else 0, axis=1
     ).round(1)
     
-    print(f"\\n📋 PER-CLASS AMBIGUITY ANALYSIS (Test Set):")
-    print(f"{'='*80}")
+    logprint(f"\\n📋 PER-CLASS AMBIGUITY ANALYSIS (Test Set):")
+    logprint(f"{'='*80}")
     # Select columns for printing to make it more readable
     cols_to_print = ['total_samples', 'accuracy', 'avg_confidence', 'avg_entropy', 
                      'softmax_ambiguous_pct', 'entropy_ambiguous_pct', 'combined_ambiguous_pct']
-    print(df_per_class[cols_to_print].round(3).to_string())
+    logprint(df_per_class[cols_to_print].round(3).to_string())
     
     # Save results
     per_class_csv_path = ambiguity_output_dir / 'per_class_ambiguity_stats.csv'
     df_per_class.to_csv(per_class_csv_path)
-    print(f"Per-class ambiguity stats saved to: {per_class_csv_path}")
+    logprint(f"Per-class ambiguity stats saved to: {per_class_csv_path}")
     
     overall_stats_csv_path = ambiguity_output_dir / 'overall_ambiguity_stats.csv'
     stats_df = pd.DataFrame([stats]) # stats is the overall dictionary
     stats_df.to_csv(overall_stats_csv_path, index=False)
-    print(f"Overall ambiguity stats saved to: {overall_stats_csv_path}")
+    logprint(f"Overall ambiguity stats saved to: {overall_stats_csv_path}")
     
-    print(f"\\n✅ Ambiguity analysis complete! Results saved to: {ambiguity_output_dir}")
+    logprint(f"\\n✅ Ambiguity analysis complete! Results saved to: {ambiguity_output_dir}")
     
     return stats, df_per_class
 
@@ -342,8 +348,9 @@ def run_ambiguity_analysis(
 #     #     val_dataset = ArtPeriodDataset(data_dir=mock_config.data.data_dir, art_periods=mock_config.data.art_periods, split="val", transform=val_transform, image_paths=val_paths, labels=val_labels)
 #     #     test_dataset = ArtPeriodDataset(data_dir=mock_config.data.data_dir, art_periods=mock_config.data.art_periods, split="test", transform=test_transform, image_paths=test_paths, labels=test_labels)
         
-#     #     val_loader = DataLoader(val_dataset, batch_size=mock_config.data.batch_size, num_workers=0)
-#     #     test_loader = DataLoader(test_dataset, batch_size=mock_config.data.batch_size, num_workers=0)
+#     #     val_loader = DataLoader(val_dataset, batch_size=mock_config.data.batch_size, num_workers=0, collate_fn=safe_collate_fn)
+#     #     test_loader = DataLoader(
+#     #         test_dataset, batch_size=mock_config.data.batch_size, num_workers=0, collate_fn=safe_collate_fn)
 #     # except Exception as e:
 #     #     print(f"Could not create dummy data loaders: {e}")
 #     #     val_loader, test_loader = None, None

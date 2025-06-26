@@ -36,7 +36,7 @@ class ModelEvaluator:
         self.device = device
         self.class_names = class_names
         self.num_classes = len(class_names)
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logging.getLogger('my_project.trainer')
         
         # Initialize metrics
         self.accuracy_metric = MulticlassAccuracy(num_classes=self.num_classes).to(device)

@@ -26,7 +26,7 @@ class AmbiguityDetector:
         self.softmax_pmax_threshold = softmax_pmax_threshold
         self.softmax_gap_threshold = softmax_gap_threshold
         self.entropy_percentile_threshold = entropy_percentile_threshold
-        self.logger = logger or logging.getLogger(__name__)
+        self.logger = logger or logging.getLogger('my_project.trainer')
         
         # Thresholds computed from validation set
         self.entropy_threshold_value = None

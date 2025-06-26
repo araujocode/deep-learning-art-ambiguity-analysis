@@ -17,18 +17,19 @@ import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score 
 from torchvision import transforms
 from sklearn.utils.class_weight import compute_class_weight
-import pandas as pd # Added import for pandas
+from torchvision.transforms import ToPILImage
+import pandas as pd
+import logging
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent / "src"))
-# Add root to path for analyze_ambiguity
-sys.path.append(str(Path(__file__).parent.parent))
+here = Path(__file__).resolve().parent
+# Add project root to path for absolute imports
+sys.path.append(str(here.parent))
 
 
-from config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig, AmbiguityConfig 
-from data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, create_tta_transforms
-from models.efficientnet_classifier import EfficientNetClassifier
-from training.trainer import Trainer
+from src.config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig, AmbiguityConfig 
+from src.data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, create_tta_transforms, safe_collate_fn
+from src.models.efficientnet_classifier import EfficientNetClassifier
+from src.training.trainer import Trainer
 from torch.utils.data import DataLoader
 from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam
 from analyze_training import analyze_training_dynamics 
@@ -109,6 +110,7 @@ def parse_arguments():
                        help="Number of workers for data loading")
     parser.add_argument("--device", type=str, default="auto",
                        help="Device to use (cuda/cpu/auto)")
+    parser.add_argument("--image_size", type=int, default=224, help="Input image size (e.g., 224, 384)")
     
     # Ambiguity Analysis arguments
     parser.add_argument("--run_ambiguity_analysis", action="store_true",
@@ -128,9 +130,34 @@ def parse_arguments():
     # New arguments
     parser.add_argument("--progressive_unfreezing", action="store_true", help="Use progressive unfreezing schedule in phase 2 (recommended)")
     parser.add_argument("--deterministic", action="store_true", help="Enable deterministic training (slower, for debugging)")
+    parser.add_argument("--unfreeze_last_n_blocks", type=int, default=2, help="Number of last blocks to unfreeze in phase 2 (non-progressive)")
+    parser.add_argument("--gradcam_layer", type=str, default="blocks[-1][-1].conv_dw",
+                       help="Target layer for Grad-CAM visualization (e.g., 'blocks[-1][-1].conv_dw', 'backbone.blocks[-1]', etc.)")
     
     return parser.parse_args()
 
+
+def setup_project_logger(output_dir: str) -> logging.Logger:
+    """Setup the unique project logger, robust to duplicate handlers."""
+    logger = logging.getLogger('my_project.trainer')
+    logger.setLevel(logging.INFO)
+    # Check for both file and console handlers
+    has_file_handler = any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+    has_console_handler = any(isinstance(h, logging.StreamHandler) for h in logger.handlers)
+    if not has_file_handler:
+        log_file = os.path.join(output_dir, 'training.log')
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    if not has_console_handler:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    return logger
 
 def create_data_loaders(config: ProjectConfig, train_transform, val_transform) -> tuple:
     """Create training, validation, and test data loaders."""
@@ -186,7 +213,8 @@ def create_data_loaders(config: ProjectConfig, train_transform, val_transform) -
         batch_size=config.data.batch_size,
         shuffle=True,
         num_workers=config.data.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=safe_collate_fn
     )
     
     val_loader = DataLoader(
@@ -194,7 +222,8 @@ def create_data_loaders(config: ProjectConfig, train_transform, val_transform) -
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=safe_collate_fn
     )
     
     test_loader = DataLoader(
@@ -202,7 +231,8 @@ def create_data_loaders(config: ProjectConfig, train_transform, val_transform) -
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=safe_collate_fn
     )
     
     return train_loader, val_loader, test_loader
@@ -218,18 +248,24 @@ def evaluate_model_after_training(config: ProjectConfig, model_path: str, test_l
     print(f"Loading best model from: {model_path}")
     model = EfficientNetClassifier(
         backbone=config.model.backbone,
-        num_classes=len(art_periods)
+        num_classes=len(art_periods),
+        dropout_rate=config.model.dropout_rate
     )
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Unified checkpoint loading: always expect 'state_dict' (no legacy fallback)
+    if 'state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['state_dict'])
+    else:
+        raise RuntimeError("Checkpoint missing model weights (expected 'state_dict')")
     model.to(device)
     model.eval()
     
-    print(f"Model loaded from epoch {checkpoint['epoch']}")
-    if 'metrics' in checkpoint and 'best_val_acc' in checkpoint['metrics']:
-         print(f"Original best validation accuracy during training: {checkpoint['metrics']['best_val_acc']:.4f}")
+    print(f"Model loaded from epoch {checkpoint.get('epoch', 'N/A')}")
+    metrics = checkpoint.get('metrics', {})
+    if 'best_val_acc' in metrics:
+        print(f"Original best validation accuracy during training: {metrics['best_val_acc']:.4f}")
     elif 'best_val_acc' in checkpoint: # For older checkpoints
-         print(f"Original best validation accuracy during training: {checkpoint['best_val_acc']:.4f}")
+        print(f"Original best validation accuracy during training: {checkpoint['best_val_acc']:.4f}")
 
 
     all_predictions = []
@@ -291,31 +327,25 @@ def evaluate_model_after_training(config: ProjectConfig, model_path: str, test_l
     return model # Return the loaded model for potential reuse
 
 
-def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, test_loader: DataLoader, device: torch.device, art_periods: list, num_examples_per_class: int = 1):
+def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, test_loader: DataLoader, device: torch.device, art_periods: list, num_examples_per_class: int = 1, gradcam_layer: str = None):
     """Generate Grad-CAM visualizations for a few examples from the test set.
     Accepts a loaded model directly.
     """
-    print("\\n" + "="*50)
+    print("\n" + "="*50)
     print("GENERATING GRAD-CAM EXAMPLES")
     print("="*50)
 
-    # Model is now passed directly, no need to load it here.
     model.eval() # Ensure the passed model is in eval mode
 
-    # Initialize GradCAMVisualizer
-    # Attempt to find a suitable layer automatically; common choices for EfficientNet
-    # Try last block of the backbone first, then conv_head
+    # Unified: use CLI arg if set, else config.ambiguity.target_layer_name
+    target_layer_name = gradcam_layer or getattr(config.ambiguity, 'target_layer_name', None)
+    if not target_layer_name:
+        target_layer_name = "blocks[-1][-1].conv_dw"  # Final fallback
     try:
-        target_layer_name = "backbone.blocks[-1]" # More specific for our model structure
         gradcam_vis = GradCAMVisualizer(model, target_layer_name=target_layer_name)
-    except Exception as e_block:
-        print(f"Warning: Could not initialize GradCAM with {target_layer_name} ({e_block}). Trying 'backbone.conv_head'.")
-        try:
-            target_layer_name = "backbone.conv_head"
-            gradcam_vis = GradCAMVisualizer(model, target_layer_name=target_layer_name)
-        except Exception as e_conv_head:
-            print(f"Error initializing GradCAMVisualizer with common layers: {e_conv_head}. Skipping Grad-CAM generation.")
-            return
+    except Exception as e:
+        print(f"Error initializing GradCAMVisualizer with layer '{target_layer_name}': {e}. Skipping Grad-CAM generation.")
+        return
 
     print(f"Grad-CAM initialized with target layer: {gradcam_vis.target_layer_name}")
 
@@ -333,8 +363,7 @@ def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, tes
         print("Error: Test dataset does not have 'image_paths' or 'labels' attributes. Skipping Grad-CAM.")
         return
 
-    # Create a basic transform for Grad-CAM preprocessing (without augmentation)
-    # This transform is for the model input, the visualizer also needs the raw image.
+    # Use config.data.image_size for Grad-CAM transform
     gradcam_transform = create_transforms(config.data.image_size, is_training=False)
 
     output_gradcam_dir = os.path.join(config.training.output_dir, "gradcam_examples")
@@ -384,7 +413,7 @@ def generate_gradcam_examples(config: ProjectConfig, model: torch.nn.Module, tes
 
 def tta_evaluate(model, dataset, device, art_periods, n_tta=5, batch_size=32):
     """
-    Run Test-Time Augmentation (TTA) evaluation on a dataset.
+    Run Test-Time Augmentation (TTA) evaluation on a dataset (vectorized, fast).
     Args:
         model: Trained model.
         dataset: ArtPeriodDataset (test set).
@@ -396,23 +425,33 @@ def tta_evaluate(model, dataset, device, art_periods, n_tta=5, batch_size=32):
         TTA accuracy (float)
     """
     model.eval()
-    tta_transforms = create_tta_transforms(dataset.transform.transforms[1].size, n=n_tta)
+    # Use dataset.image_size if available, else default to 224
+    image_size = getattr(dataset, 'image_size', 224)
+    if hasattr(dataset, 'transform') and hasattr(dataset.transform, 'transforms'):
+        for t in dataset.transform.transforms:
+            if hasattr(t, 'size'):
+                image_size = t.size if isinstance(t.size, int) else t.size[0]
+                break
+    tta_transforms = create_tta_transforms(image_size, n=n_tta)
     all_labels = []
     all_probs = []
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=safe_collate_fn)
     with torch.no_grad():
-        for img, label in tqdm(loader, desc="TTA Evaluation"):
-            img = img.squeeze(0)  # Remove batch dim
-            tta_preds = []
+        for imgs, labels in tqdm(loader, desc="TTA Evaluation"):  # imgs: (B, C, H, W)
+            B = imgs.size(0)
+            # Vectorized: for each TTA, apply to all images in batch, then stack
+            augmented_batches = []
             for t in tta_transforms:
-                aug_img = t(transforms.ToPILImage()(img.cpu()))
-                aug_img = aug_img.unsqueeze(0).to(device)
-                out = model(aug_img)
-                prob = torch.softmax(out, dim=1).cpu().numpy()
-                tta_preds.append(prob)
-            avg_prob = np.mean(tta_preds, axis=0)
-            all_probs.append(avg_prob)
-            all_labels.append(label.item())
+                batch_aug = torch.stack([t(img.cpu()) for img in imgs])
+                augmented_batches.append(batch_aug)
+            aug_imgs = torch.cat(augmented_batches, dim=0).to(device)
+            outputs = model(aug_imgs)
+            num_classes = outputs.size(1)
+            outputs = outputs.view(n_tta, B, num_classes).permute(1, 0, 2)
+            probs = torch.softmax(outputs, dim=2)
+            avg_probs = probs.mean(dim=1)
+            all_probs.append(avg_probs.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     all_probs = np.concatenate(all_probs, axis=0)
     preds = np.argmax(all_probs, axis=1)
     acc = (preds == np.array(all_labels)).mean()
@@ -437,13 +476,21 @@ def main():
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
     
+    # Create output directories
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+    
+    # Setup logger
+    logger = setup_project_logger(args.output_dir)
+    
     # Create configuration
     config = ProjectConfig(
         data=DataConfig(
             data_dir=args.data_dir,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            # Optionally add image_size if needed
+            image_size=args.image_size,  # Pass CLI image_size
+            # Optionally add other fields
         ),
         model=ModelConfig(
             backbone=args.backbone,
@@ -459,7 +506,7 @@ def main():
             use_cutmix=args.use_cutmix,
             cutmix_alpha=args.cutmix_alpha,
             use_focal_loss=args.use_focal_loss,
-            unfreeze_last_n_blocks=2,  # default, can be CLI
+            unfreeze_last_n_blocks=args.unfreeze_last_n_blocks,
             lr_scheduler=args.lr_scheduler
         ),
         training=TrainingConfig(
@@ -475,20 +522,16 @@ def main():
         )
     )
     
-    # Create output directories
-    os.makedirs(config.training.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(config.training.output_dir, "checkpoints"), exist_ok=True)
-    
     # Create transforms with CLI/config toggles
     train_transform = create_transforms(
-        image_size=config.data.image_size,
+        image_size=config.data.image_size,  # Use config.data.image_size
         is_training=True,
         use_randaugment=args.use_randaugment,
         use_autoaugment=args.use_autoaugment,
         use_random_erasing=args.use_random_erasing
     )
     val_transform = create_transforms(
-        image_size=config.data.image_size,
+        image_size=config.data.image_size,  # Use config.data.image_size
         is_training=False
     )
     # Create data loaders
@@ -548,12 +591,13 @@ def main():
         val_loader=val_loader,
         device=device,
         output_dir=args.output_dir,
-        logger=None,
+        logger=logger,
         use_mixup=args.use_mixup,
         mixup_alpha=args.mixup_alpha,
         use_cutmix=args.use_cutmix,
         cutmix_alpha=args.cutmix_alpha,
-        use_focal_loss=args.use_focal_loss
+        use_focal_loss=args.use_focal_loss,
+        ambiguity_weights=ambiguity_weights
     )
     # Set class weights in trainer
     trainer.set_class_weights(class_weights)
@@ -578,11 +622,12 @@ def main():
     print("="*50)
 
     if args.progressive_unfreezing:
-        phase2_history = trainer.train_phase2_progressive(
+        phase2_history = trainer.train_phase2_staged(
             total_epochs=args.stage1_epochs + args.stage2_epochs + args.stage3_epochs,
             stage1_epochs=args.stage1_epochs,
             stage2_epochs=args.stage2_epochs,
             stage3_epochs=args.stage3_epochs,
+            learning_rate=config.model.phase2_lr,
             weight_decay=config.model.weight_decay,
             label_smoothing=config.model.label_smoothing,
             early_stopping_patience=args.early_stopping_patience_phase2,
@@ -634,18 +679,17 @@ def main():
 
     # Generate Grad-CAM examples using the already loaded model
     if evaluated_model: # Ensure model was loaded successfully
-        generate_gradcam_examples(config, evaluated_model, test_loader, device, config.data.art_periods, num_examples_per_class=1)
+        generate_gradcam_examples(config, evaluated_model, test_loader, device, config.data.art_periods, num_examples_per_class=1, gradcam_layer=args.gradcam_layer)
     else:
         print("Skipping Grad-CAM generation as model could not be loaded/evaluated.")
 
-
     # Analyze training dynamics
-    analyze_training_dynamics(experiment_dir=config.training.output_dir)
+    analyze_training_dynamics(experiment_dir=config.training.output_dir, logger=logger)
 
     # Run Ambiguity Analysis if flagged
     if config.ambiguity.run_analysis:
         if evaluated_model: # Reuse the loaded model
-            print("\\n" + "="*50)
+            print("\n" + "="*50)
             print("RUNNING AMBIGUITY ANALYSIS")
             print("="*50)
             ambiguity_output_dir = Path(config.training.output_dir) / "ambiguity_analysis"
@@ -655,7 +699,8 @@ def main():
                 val_loader=val_loader,
                 test_loader=test_loader,
                 device=device,
-                ambiguity_output_dir=ambiguity_output_dir
+                ambiguity_output_dir=ambiguity_output_dir,
+                logger=logger
             )
         else:
             print("Skipping ambiguity analysis as the model was not available from evaluation.")

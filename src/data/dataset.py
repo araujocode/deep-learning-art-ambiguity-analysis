@@ -7,6 +7,7 @@ from torchvision import transforms
 from torchvision.transforms import RandAugment, AutoAugment, AutoAugmentPolicy
 import numpy as np
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm  # Added for progress bar
 
 
 class ArtPeriodDataset(Dataset):
@@ -57,7 +58,9 @@ class ArtPeriodDataset(Dataset):
                 print(f"Warning: Directory {period_dir} not found")
                 continue
             label = self.period_to_idx[period]
-            for filename in os.listdir(period_dir):
+            files = os.listdir(period_dir)
+            print(f"Scanning {period} ({len(files)} files)...")
+            for filename in tqdm(files, desc=f"{period}", unit="img"):
                 if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
                     img_path = os.path.join(period_dir, filename)
                     try:

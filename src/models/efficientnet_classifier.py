@@ -6,7 +6,9 @@ import numpy as np
 
 
 class EfficientNetClassifier(nn.Module):
-    """EfficientNet-based classifier for art period classification."""
+    """EfficientNet-based classifier for art period classification.
+    Supports efficientnet_b0, b1, b2, b3, b4 backbones (timm required).
+    """
     
     def __init__(
         self,

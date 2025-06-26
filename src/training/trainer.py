@@ -94,7 +94,14 @@ class Trainer:
         # Focal Loss
         self.use_focal_loss = use_focal_loss
         self.ambiguity_weights = ambiguity_weights
-    
+        
+        # Class-balanced weights (optional, can be set externally)
+        self.class_weights = None
+
+    def set_class_weights(self, class_weights: torch.Tensor):
+        """Set class-balanced weights for loss function."""
+        self.class_weights = class_weights
+
     def _setup_logger(self) -> logging.Logger:
         """Setup logger for training."""
         logger = logging.getLogger('Trainer')
@@ -122,11 +129,12 @@ class Trainer:
         return logger
     
     def _get_loss(self, label_smoothing: float = 0.1):
-        """Get loss function with optional Focal Loss."""
+        """Get loss function with optional Focal Loss and class weights."""
+        weight = self.ambiguity_weights if self.ambiguity_weights is not None else self.class_weights
         if self.use_focal_loss:
-            return FocalLoss(gamma=2.0, weight=self.ambiguity_weights)
+            return FocalLoss(gamma=2.0, weight=weight)
         else:
-            return nn.CrossEntropyLoss(label_smoothing=label_smoothing, weight=self.ambiguity_weights)
+            return nn.CrossEntropyLoss(label_smoothing=label_smoothing, weight=weight)
 
     def train_phase1(
         self,

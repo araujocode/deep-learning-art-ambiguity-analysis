@@ -34,7 +34,9 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Configuration for model architecture."""
+    # Add b3 and b4 as valid options
     backbone: str = "efficientnet_b2"  # Using a larger model
+    # Valid options: efficientnet_b0, b1, b2, b3, b4
     pretrained: bool = True
     num_classes: int = 8 # Adjusted from 7 to 8 (Realism added)
     dropout_rate: float = 0.4  # More regularization

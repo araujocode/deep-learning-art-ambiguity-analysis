@@ -60,7 +60,7 @@ def parse_arguments():
     
     # Model arguments
     parser.add_argument("--backbone", type=str, default="efficientnet_b0",
-                   choices=["efficientnet_b0", "efficientnet_b1", "efficientnet_b2"],
+                   choices=["efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "efficientnet_b3", "efficientnet_b4"],
                    help="EfficientNet backbone to use")
     parser.add_argument("--dropout_rate", type=float, default=0.3,
                        help="Dropout rate before classifier")

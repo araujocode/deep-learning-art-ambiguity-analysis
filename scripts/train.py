@@ -25,7 +25,6 @@ here = Path(__file__).resolve().parent
 # Add project root to path for absolute imports
 sys.path.append(str(here.parent))
 
-
 from src.config.config import ProjectConfig, DataConfig, ModelConfig, TrainingConfig, AmbiguityConfig 
 from src.data.dataset import ArtPeriodDataset, DatasetSplitter, create_transforms, create_tta_transforms, safe_collate_fn
 from src.models.efficientnet_classifier import EfficientNetClassifier
@@ -34,7 +33,6 @@ from torch.utils.data import DataLoader
 from src.visualization.gradcam import GradCAMVisualizer, preprocess_image_for_gradcam
 from analyze_training import analyze_training_dynamics 
 from analyze_ambiguity import run_ambiguity_analysis 
-
 
 def set_seed(seed: int):
     """Set random seeds for reproducibility."""
@@ -71,9 +69,6 @@ def parse_arguments():
                        help="Number of epochs for phase 1 training")
     parser.add_argument("--phase2_epochs", type=int, default=40, # Changed from 20 to 40
                        help="Number of epochs for phase 2 training")
-    parser.add_argument("--stage1_epochs", type=int, default=10, help="Epochs for phase 2 stage 1 (last 2 blocks)")
-    parser.add_argument("--stage2_epochs", type=int, default=10, help="Epochs for phase 2 stage 2 (last 4 blocks)")
-    parser.add_argument("--stage3_epochs", type=int, default=20, help="Epochs for phase 2 stage 3 (full unfreeze)")
     parser.add_argument("--phase1_lr", type=float, default=1e-3,
                        help="Learning rate for phase 1")
     parser.add_argument("--phase2_lr", type=float, default=1e-4,
@@ -435,14 +430,17 @@ def tta_evaluate(model, dataset, device, art_periods, n_tta=5, batch_size=32):
     tta_transforms = create_tta_transforms(image_size, n=n_tta)
     all_labels = []
     all_probs = []
+    to_pil = ToPILImage()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=safe_collate_fn)
     with torch.no_grad():
-        for imgs, labels in tqdm(loader, desc="TTA Evaluation"):  # imgs: (B, C, H, W)
+        for imgs, labels, _ in tqdm(loader, desc="TTA Evaluation"):  # imgs: (B, C, H, W)
+            if imgs.numel() == 0:
+                continue  # Skip empty batches
             B = imgs.size(0)
             # Vectorized: for each TTA, apply to all images in batch, then stack
             augmented_batches = []
             for t in tta_transforms:
-                batch_aug = torch.stack([t(img.cpu()) for img in imgs])
+                batch_aug = torch.stack([t(to_pil(img.cpu())) for img in imgs])
                 augmented_batches.append(batch_aug)
             aug_imgs = torch.cat(augmented_batches, dim=0).to(device)
             outputs = model(aug_imgs)
@@ -540,7 +538,7 @@ def main():
     
     # Compute class weights from training labels
     train_labels = []
-    for _, labels in train_loader:
+    for _, labels, _ in train_loader:
         train_labels.extend(labels.cpu().numpy())
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
@@ -623,10 +621,10 @@ def main():
 
     if args.progressive_unfreezing:
         phase2_history = trainer.train_phase2_staged(
-            total_epochs=args.stage1_epochs + args.stage2_epochs + args.stage3_epochs,
-            stage1_epochs=args.stage1_epochs,
-            stage2_epochs=args.stage2_epochs,
-            stage3_epochs=args.stage3_epochs,
+            total_epochs=config.model.stage1_epochs + config.model.stage2_epochs + config.model.stage3_epochs,
+            stage1_epochs=config.model.stage1_epochs,
+            stage2_epochs=config.model.stage2_epochs,
+            stage3_epochs=config.model.stage3_epochs,
             learning_rate=config.model.phase2_lr,
             weight_decay=config.model.weight_decay,
             label_smoothing=config.model.label_smoothing,
@@ -660,7 +658,7 @@ def main():
     print(f"Total epochs: {summary['total_epochs']}")
     print(f"Final trainable parameters: {summary['parameter_count']['trainable_parameters']:,}")
     
-    print(f"\\nTraining completed! Best model saved to:")
+    print("\nTraining completed! Best model saved to:")
     best_model_path = os.path.join(config.training.output_dir, 'checkpoints', 'best_model.pth')
     print(best_model_path)
 

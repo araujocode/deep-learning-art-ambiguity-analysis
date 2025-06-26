@@ -513,6 +513,7 @@ class Trainer:
         """Train for one epoch."""
         self.model.train()
         total_loss = 0.0
+        num_processed = 0
         self.accuracy_metric.reset()
         progress_bar = tqdm(self.train_loader, desc=f"{phase_name} Epoch {current_epoch}/{total_epochs} [Training]", unit="batch")
         mixup = MixUp(self.mixup_alpha) if self.use_mixup else None
@@ -550,9 +551,10 @@ class Trainer:
             if batch_scheduler is not None:
                 batch_scheduler.step()
             total_loss += loss.item() * inputs.size(0)
+            num_processed += inputs.size(0)
             self.accuracy_metric.update(outputs, labels)
             progress_bar.set_postfix(loss=loss.item(), acc=self.accuracy_metric.compute().item())
-        avg_loss = total_loss / len(self.train_loader.dataset)
+        avg_loss = total_loss / num_processed if num_processed > 0 else 0.0
         avg_acc = self.accuracy_metric.compute().item()
         return avg_loss, avg_acc
 
@@ -566,6 +568,7 @@ class Trainer:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
+        num_processed = 0
         self.accuracy_metric.reset()
         self.calibration_metric.reset()
         progress_bar = tqdm(self.val_loader, desc=f"{phase_name} Epoch {current_epoch}/{total_epochs} [Validation]", unit="batch")
@@ -586,10 +589,11 @@ class Trainer:
                 else:
                     loss = criterion(outputs, labels)
                 total_loss += loss.item() * inputs.size(0)
+                num_processed += inputs.size(0)
                 self.accuracy_metric.update(outputs, labels)
                 self.calibration_metric.update(outputs, labels)
                 progress_bar.set_postfix(loss=loss.item(), acc=self.accuracy_metric.compute().item(), ece=self.calibration_metric.compute().item())
-        avg_loss = total_loss / len(self.val_loader.dataset)
+        avg_loss = total_loss / num_processed if num_processed > 0 else 0.0
         avg_acc = self.accuracy_metric.compute().item()
         avg_ece = self.calibration_metric.compute().item()
         return avg_loss, avg_acc, avg_ece

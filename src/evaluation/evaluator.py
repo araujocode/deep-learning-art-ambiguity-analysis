@@ -73,7 +73,7 @@ class ModelEvaluator:
         criterion = nn.CrossEntropyLoss()
         
         with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(data_loader):
+            for batch_idx, (data, target, _) in enumerate(data_loader):
                 data, target = data.to(self.device), target.to(self.device)
                 
                 # Forward pass

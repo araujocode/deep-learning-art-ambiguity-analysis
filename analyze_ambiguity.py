@@ -60,7 +60,7 @@ def run_ambiguity_analysis(
     
     logprint("\n🔄 Processing validation set for ambiguity threshold calibration...")
     with torch.no_grad():
-        for images, _ in val_loader: # labels not needed here
+        for images, _, _ in val_loader: # labels and indices not needed here
             images = images.to(device)
             logits = model(images)
             val_logits_list.append(logits.cpu())
@@ -76,7 +76,7 @@ def run_ambiguity_analysis(
     
     logprint("🔄 Processing test set for ambiguity analysis...")
     with torch.no_grad():
-        for images, labels in test_loader:
+        for images, labels, _ in test_loader:
             images = images.to(device)
             logits = model(images)
             test_logits_list.append(logits.cpu())
